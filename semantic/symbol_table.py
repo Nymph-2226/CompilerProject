@@ -1,10 +1,8 @@
-"""
-语义分析预研接口
-符号表与类型检查 - 选做+5分
-"""
+# semantic/symbol_table.py - 完整版
 
+import re
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
 from enum import Enum, auto
 
 
@@ -34,222 +32,130 @@ class Symbol:
     data_type: DataType
     line: int
     column: int
-    scope: str = "global"
     initialized: bool = False
-    references: List[int] = field(default_factory=list)
-
-
-class SymbolTable:
-    """符号表"""
-    
-    def __init__(self):
-        self.symbols: Dict[str, Symbol] = {}
-        self.scopes: Dict[str, List[str]] = {"global": []}
-        self.current_scope = "global"
-        self.errors: List[str] = []
-    
-    def enter_scope(self, scope_name: str):
-        """进入新作用域"""
-        self.current_scope = scope_name
-        if scope_name not in self.scopes:
-            self.scopes[scope_name] = []
-    
-    def exit_scope(self):
-        """退出作用域"""
-        self.current_scope = "global"
-    
-    def declare(self, name: str, kind: SymbolKind, data_type: DataType, 
-                line: int, column: int) -> bool:
-        """声明符号"""
-        full_name = f"{self.current_scope}:{name}"
-        
-        # 检查是否已存在
-        if full_name in self.symbols:
-            self.errors.append(
-                f"变量重定义错误: '{name}' 已在第 {self.symbols[full_name].line} 行定义"
-            )
-            return False
-        
-        # 在当前作用域检查同名变量
-        for sym_name in self.scopes.get(self.current_scope, []):
-            if sym_name == name:
-                self.errors.append(
-                    f"变量重定义错误: '{name}' 在当前作用域已存在"
-                )
-                return False
-        
-        symbol = Symbol(
-            name=name,
-            kind=kind,
-            data_type=data_type,
-            line=line,
-            column=column,
-            scope=self.current_scope
-        )
-        self.symbols[full_name] = symbol
-        self.scopes[self.current_scope].append(name)
-        return True
-    
-    def lookup(self, name: str, line: int, column: int) -> Optional[Symbol]:
-        """查找符号（支持作用域链）"""
-        # 先在当前作用域查找
-        full_name = f"{self.current_scope}:{name}"
-        if full_name in self.symbols:
-            self.symbols[full_name].references.append(line)
-            return self.symbols[full_name]
-        
-        # 在全局作用域查找
-        global_name = f"global:{name}"
-        if global_name in self.symbols:
-            self.symbols[global_name].references.append(line)
-            return self.symbols[global_name]
-        
-        # 未找到
-        self.errors.append(
-            f"未声明引用错误: 变量 '{name}' 在第 {line} 行未声明"
-        )
-        return None
-    
-    def check_initialized(self, name: str, line: int) -> bool:
-        """检查变量是否已初始化"""
-        symbol = self.lookup(name, line, line)
-        if symbol and not symbol.initialized:
-            self.errors.append(
-                f"未初始化错误: 变量 '{name}' 在第 {line} 行使用前未初始化"
-            )
-            return False
-        return True
-    
-    def set_initialized(self, name: str, line: int):
-        """标记变量已初始化"""
-        full_name = f"{self.current_scope}:{name}"
-        if full_name in self.symbols:
-            self.symbols[full_name].initialized = True
-        
-        global_name = f"global:{name}"
-        if global_name in self.symbols:
-            self.symbols[global_name].initialized = True
-    
-    def print_table(self) -> str:
-        """打印符号表"""
-        output = []
-        output.append("=" * 70)
-        output.append("符号表 (Symbol Table)")
-        output.append("=" * 70)
-        output.append(f"{'名称':<15} {'类型':<12} {'数据类型':<10} {'行号':<6} {'作用域':<10} {'已初始化'}")
-        output.append("-" * 70)
-        
-        for full_name, sym in self.symbols.items():
-            name = sym.name
-            kind = sym.kind.name
-            data_type = sym.data_type.name
-            output.append(
-                f"{name:<15} {kind:<12} {data_type:<10} {sym.line:<6} "
-                f"{sym.scope:<10} {'是' if sym.initialized else '否'}"
-            )
-        
-        return "\n".join(output)
 
 
 class SemanticAnalyzer:
-    """语义分析器 - 预研接口"""
+    """语义分析器 - 检测变量重定义、未声明引用、未初始化使用"""
     
     def __init__(self):
-        self.symbol_table = SymbolTable()
+        self.symbols: Dict[str, Symbol] = {}
         self.errors: List[str] = []
+        self.in_function = False
+        self.current_function = None
+        self.has_return = False
     
-    def analyze(self, ast) -> bool:
-        """
-        分析AST，进行语义检查
+    def analyze_code(self, code: str) -> bool:
+        """分析代码字符串"""
+        self.symbols.clear()
+        self.errors.clear()
+        self.in_function = False
+        self.current_function = None
+        self.has_return = False
         
-        支持的检查：
-        1. 变量重定义
-        2. 未声明引用
-        3. 类型检查（基础）
-        """
-        self.errors = []
-        self._visit(ast)
+        lines = code.split('\n')
+        
+        # 第一遍：收集所有变量声明
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line or line.startswith('//'):
+                continue
+            
+            # 匹配声明语句: int x, int x = 1, int x=1
+            declare_match = re.match(r'(int|float|var|double|char|bool)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:=.*)?', line)
+            if declare_match:
+                var_type = declare_match.group(1)
+                var_name = declare_match.group(2)
+                
+                # 检查变量名是否合法
+                if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', var_name):
+                    self.errors.append(
+                        f"语法错误: 变量名 '{var_name}' 在第 {line_num} 行不合法"
+                    )
+                    continue
+                
+                # 检查是否包含非法运算符
+                operators = ['+', '-', '*', '/', '%', '&', '|', '^', '~']
+                for op in operators:
+                    if op in var_name:
+                        self.errors.append(
+                            f"语法错误: 第 {line_num} 行变量名 '{var_name}' 包含非法运算符 '{op}'"
+                        )
+                        break
+                
+                # 检查重定义
+                if var_name in self.symbols:
+                    existing = self.symbols[var_name]
+                    self.errors.append(
+                        f"变量重定义错误: '{var_name}' 已在第 {existing.line} 行定义"
+                    )
+                else:
+                    # 确定数据类型
+                    dt_map = {
+                        'int': DataType.INT, 'float': DataType.FLOAT,
+                        'double': DataType.FLOAT, 'bool': DataType.BOOL,
+                        'char': DataType.STRING, 'var': DataType.UNKNOWN
+                    }
+                    dt = dt_map.get(var_type, DataType.UNKNOWN)
+                    
+                    # 检查是否有初始化
+                    initialized = '=' in line
+                    
+                    self.symbols[var_name] = Symbol(
+                        name=var_name,
+                        kind=SymbolKind.VARIABLE,
+                        data_type=dt,
+                        line=line_num,
+                        column=1,
+                        initialized=initialized
+                    )
+        
+        # 第二遍：检查变量使用
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line or line.startswith('//'):
+                continue
+            
+            # 跳过声明语句本身（已经在第一遍处理）
+            if re.match(r'(int|float|var|double|char|bool)\s+', line):
+                continue
+            
+            # 提取所有标识符
+            identifiers = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', line)
+            keywords = {
+                'int', 'float', 'var', 'double', 'char', 'bool', 'void',
+                'if', 'else', 'while', 'for', 'do', 'break', 'continue',
+                'return', 'include', 'using', 'namespace', 'std', 'cout', 
+                'cin', 'main', 'true', 'false', 'NULL', 'nullptr',
+                'printf', 'scanf', 'sizeof', 'struct', 'class', 'public',
+                'private', 'protected', 'virtual', 'static', 'const'
+            }
+            
+            for ident in identifiers:
+                if ident in keywords:
+                    continue
+                
+                # 检查是否是赋值语句的左边
+                is_left_side = False
+                if re.match(rf'^{ident}\s*=', line):
+                    is_left_side = True
+                if re.match(rf'^{ident}\s*[+\-*/%]=', line):
+                    is_left_side = True
+                
+                # 检查是否是 return 语句中的变量
+                is_return = line.startswith('return')
+                
+                # 查找变量
+                if ident not in self.symbols:
+                    self.errors.append(
+                        f"未声明引用错误: 变量 '{ident}' 在第 {line_num} 行未声明"
+                    )
+                elif not is_left_side and not is_return and not self.symbols[ident].initialized:
+                    self.errors.append(
+                        f"未初始化错误: 变量 '{ident}' 在第 {line_num} 行使用前未初始化"
+                    )
+        
         return len(self.errors) == 0
-    
-    def _visit(self, node):
-        """遍历AST节点"""
-        if node is None:
-            return
-        
-        node_type = node.node_type if hasattr(node, 'node_type') else node.type
-        
-        if node_type in ['VariableDeclaration', 'DeclStmt']:
-            self._check_declaration(node)
-        elif node_type in ['Identifier', 'id', 'Ident']:
-            self._check_reference(node)
-        elif node_type in ['Assignment', 'AssignStmt']:
-            self._check_assignment(node)
-        
-        # 递归遍历子节点
-        children = node.children if hasattr(node, 'children') else []
-        for child in children:
-            self._visit(child)
-    
-    def _check_declaration(self, node):
-        """检查变量声明"""
-        name = self._get_name(node)
-        line = self._get_line(node)
-        col = self._get_column(node)
-        
-        if name:
-            self.symbol_table.declare(
-                name=name,
-                kind=SymbolKind.VARIABLE,
-                data_type=DataType.INT,
-                line=line,
-                column=col
-            )
-    
-    def _check_reference(self, node):
-        """检查变量引用"""
-        name = self._get_name(node)
-        line = self._get_line(node)
-        col = self._get_column(node)
-        
-        if name:
-            self.symbol_table.lookup(name, line, col)
-    
-    def _check_assignment(self, node):
-        """检查赋值语句"""
-        # 获取左值
-        lhs = self._get_lhs(node)
-        line = self._get_line(node)
-        
-        if lhs:
-            # 标记变量已初始化
-            self.symbol_table.set_initialized(lhs, line)
-    
-    def _get_name(self, node) -> str:
-        """获取节点名称"""
-        if hasattr(node, 'value') and node.value:
-            return str(node.value)
-        if hasattr(node, 'name'):
-            return node.name
-        return None
-    
-    def _get_line(self, node) -> int:
-        """获取行号"""
-        if hasattr(node, 'line'):
-            return node.line
-        return 0
-    
-    def _get_column(self, node) -> int:
-        """获取列号"""
-        if hasattr(node, 'column'):
-            return node.column
-        return 0
-    
-    def _get_lhs(self, node):
-        """获取赋值左值"""
-        if hasattr(node, 'children') and node.children:
-            first_child = node.children[0]
-            return self._get_name(first_child)
-        return None
     
     def get_report(self) -> str:
         """获取分析报告"""
@@ -260,11 +166,38 @@ class SemanticAnalyzer:
         
         if self.errors:
             report.append("\n❌ 发现的语义错误:")
+            # 去重
+            unique_errors = []
             for err in self.errors:
+                if err not in unique_errors:
+                    unique_errors.append(err)
+            for err in unique_errors:
                 report.append(f"  • {err}")
         else:
             report.append("\n✅ 未发现语义错误")
         
-        report.append("\n" + self.symbol_table.print_table())
+        report.append("\n" + "=" * 70)
+        report.append("符号表 (Symbol Table)")
+        report.append("=" * 70)
+        report.append(f"{'名称':<15} {'数据类型':<12} {'行号':<8} {'已初始化'}")
+        report.append("-" * 50)
+        
+        for name, sym in self.symbols.items():
+            data_type = sym.data_type.name
+            report.append(
+                f"{name:<15} {data_type:<12} {sym.line:<8} {'是' if sym.initialized else '否'}"
+            )
         
         return "\n".join(report)
+
+
+# 兼容旧代码的别名
+SymbolTable = SemanticAnalyzer
+
+
+def analyze_semantic(code: str) -> Tuple[bool, str, List[str]]:
+    """便捷函数：分析代码语义"""
+    analyzer = SemanticAnalyzer()
+    is_valid = analyzer.analyze_code(code)
+    report = analyzer.get_report()
+    return is_valid, report, analyzer.errors

@@ -14,15 +14,16 @@ from grammar import ImprovedGrammar, ChomskyClassifier, HandleAnalyzer
 from parser.recursive_descent import RecursiveDescentParser
 from parser.error_recovery import ErrorRecovery, ParseErrorInfo
 from parser.ast_similarity import ASTSimilarity
-from parser.ast_node import ASTNode
 from parser.ll1_analyzer import LL1Analyzer
 from llm.llm_client import LLMClient
 from llm.grammar_constrained import GrammarConstrainedGenerator
 from llm.error_diagnosis import ErrorDiagnosis
-from llm.feedback_parser import FeedbackParser
 from knowledge_base import KnowledgeBase
 from question_grammar import IntelligentQA
-from semantic import SemanticAnalyzer, SymbolKind, DataType
+
+# 语义分析模块
+from semantic import SemanticAnalyzer, analyze_semantic
+
 
 class MainWindow(QMainWindow):
     """主窗口"""
@@ -53,10 +54,9 @@ class MainWindow(QMainWindow):
         self.ast_similarity = ASTSimilarity()
         
         print("  - 初始化LLM模块...")
-        self.llm_client = LLMClient(mock_mode=True)
+        self.llm_client = LLMClient(mock_mode=False)
         self.grammar_constrained = GrammarConstrainedGenerator()
         self.error_diagnosis = ErrorDiagnosis(self.llm_client)
-        self.feedback_parser = FeedbackParser()
         
         print("  - 初始化问答模块...")
         self.knowledge_base = KnowledgeBase()
@@ -138,16 +138,16 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.create_qa_tab(), "📚 智能问答")
         tabs.addTab(self.create_grammar_tab(), "📖 文法分析")
         tabs.addTab(self.create_lexical_tab(), "✏️ 词法分析")
+        tabs.addTab(self.create_ll1_tab(), "📊 LL(1)分析")
         tabs.addTab(self.create_llm_tab(), "🤖 LLM增强功能")
-        tabs.addTab(self.create_ll1_tab(), "📊 LL(1)分析")  
         tabs.addTab(self.create_semantic_tab(), "🔍 语义分析")
-
+        
         main_layout.addWidget(tabs)
         
         # 状态栏
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
-        self.statusBar.showMessage("✅ 系统就绪 | LLM模式: 模拟模式")
+        self.statusBar.showMessage("✅ 系统就绪 | LLM模式: " + ("真实API" if not self.llm_client.mock_mode else "模拟模式"))
         
         print("  - UI初始化完成")
 
@@ -340,34 +340,216 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar.showMessage(f"✅ 词法分析完成，共识别 {len(tokens)} 个词法单元")
 
-    # ==================== LLM增强功能标签页 ====================
-    def create_llm_tab(self):
-        """创建LLM增强功能标签页"""
+    # ==================== LL(1)分析标签页 ====================
+    def create_ll1_tab(self):
+        """创建LL(1)分析标签页"""
         widget = QWidget()
         layout = QVBoxLayout()
-    
+        
+        # 文法选择
+        select_group = QGroupBox("📖 选择文法")
+        select_layout = QHBoxLayout()
+        
+        self.grammar_combo = QComboBox()
+        self.grammar_combo.addItems([
+            "反馈格式文法（作业）",
+            "算术表达式文法"
+        ])
+        self.grammar_combo.currentTextChanged.connect(self.on_grammar_changed)
+        
+        select_layout.addWidget(QLabel("文法类型:"))
+        select_layout.addWidget(self.grammar_combo)
+        select_layout.addStretch()
+        select_group.setLayout(select_layout)
+        
+        # 自定义文法输入
+        custom_group = QGroupBox("✏️ 自定义文法（可选）")
+        custom_layout = QVBoxLayout()
+        self.custom_grammar_input = QPlainTextEdit()
+        self.custom_grammar_input.setPlaceholderText(
+            "请输入文法产生式，每行一条，使用 -> 或 →\n"
+            "示例：\n"
+            "S -> a S | b\n"
+            "E -> E + T | T\n"
+            "T -> F\n"
+            "F -> ( E ) | id"
+        )
+        self.custom_grammar_input.setMaximumHeight(150)
+        use_custom_btn = QPushButton("使用自定义文法")
+        use_custom_btn.clicked.connect(self.use_custom_grammar)
+        custom_layout.addWidget(self.custom_grammar_input)
+        custom_layout.addWidget(use_custom_btn)
+        custom_group.setLayout(custom_layout)
+        
+        # 分析按钮
+        analyze_btn = QPushButton("🔍 执行LL(1)分析")
+        analyze_btn.setStyleSheet("background-color: #48bb78; font-size: 14px; padding: 10px;")
+        analyze_btn.clicked.connect(self.run_ll1_analysis)
+        
+        # 结果显示区域
+        result_group = QGroupBox("📊 分析结果")
+        result_layout = QVBoxLayout()
+        self.ll1_result = QTextEdit()
+        self.ll1_result.setReadOnly(True)
+        self.ll1_result.setFont(QFont("Consolas", 11))
+        result_layout.addWidget(self.ll1_result)
+        result_group.setLayout(result_layout)
+        
+        # 布局
+        layout.addWidget(select_group)
+        layout.addWidget(custom_group)
+        layout.addWidget(analyze_btn)
+        layout.addWidget(result_group)
+        
+        widget.setLayout(layout)
+        
+        # 默认加载反馈格式文法
+        self.current_analyzer = LL1Analyzer()
+        self.current_analyzer.set_feedback_grammar()
+        self.display_ll1_result()
+        
+        return widget
+
+    def on_grammar_changed(self, grammar_type: str):
+        """文法类型改变时的处理"""
+        self.current_analyzer = LL1Analyzer()
+        
+        if grammar_type == "反馈格式文法（作业）":
+            self.current_analyzer.set_feedback_grammar()
+        else:
+            self.current_analyzer.set_expression_grammar()
+        
+        self.display_ll1_result()
+
+    def use_custom_grammar(self):
+        """使用自定义文法"""
+        grammar_text = self.custom_grammar_input.toPlainText().strip()
+        if not grammar_text:
+            QMessageBox.warning(self, "提示", "请输入文法产生式！")
+            return
+        
+        try:
+            self.current_analyzer = LL1Analyzer()
+            first_line = grammar_text.split('\n')[0]
+            if '->' in first_line:
+                start = first_line.split('->')[0].strip()
+            elif '→' in first_line:
+                start = first_line.split('→')[0].strip()
+            else:
+                start = "S"
+            
+            self.current_analyzer.set_grammar(grammar_text, start)
+            self.display_ll1_result()
+            
+            self.grammar_combo.blockSignals(True)
+            self.grammar_combo.setCurrentText("自定义文法")
+            self.grammar_combo.blockSignals(False)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"文法解析失败: {str(e)}")
+
+    def run_ll1_analysis(self):
+        """执行LL(1)分析"""
+        self.statusBar.showMessage("🔄 正在执行LL(1)分析...")
+        
+        grammar_type = self.grammar_combo.currentText()
+        
+        self.current_analyzer = LL1Analyzer()
+        
+        if grammar_type == "反馈格式文法（作业）":
+            self.current_analyzer.set_feedback_grammar()
+        elif grammar_type == "算术表达式文法":
+            self.current_analyzer.set_expression_grammar()
+        else:
+            custom_text = self.custom_grammar_input.toPlainText().strip()
+            if custom_text:
+                try:
+                    first_line = custom_text.split('\n')[0]
+                    if '->' in first_line:
+                        start = first_line.split('->')[0].strip()
+                    elif '→' in first_line:
+                        start = first_line.split('→')[0].strip()
+                    else:
+                        start = "S"
+                    self.current_analyzer.set_grammar(custom_text, start)
+                except Exception as e:
+                    self.ll1_result.setText(f"❌ 文法解析失败: {str(e)}")
+                    self.statusBar.showMessage("❌ 文法解析失败")
+                    return
+            else:
+                self.current_analyzer.set_feedback_grammar()
+        
+        self.display_ll1_result()
+        self.statusBar.showMessage("✅ LL(1)分析完成")
+
+    def display_ll1_result(self):
+        """显示LL(1)分析结果"""
+        result = self.current_analyzer.analyze()
+        
+        output = []
+        
+        # 文法信息
+        output.append(result.grammar_info)
+        output.append("")
+        
+        # FIRST集
+        output.append(self.current_analyzer.print_first_sets())
+        output.append("")
+        
+        # FOLLOW集
+        output.append(self.current_analyzer.print_follow_sets())
+        output.append("")
+        
+        # 预测分析表
+        output.append(self.current_analyzer.print_predict_table())
+        output.append("")
+        
+        # LL(1)检测结果
+        output.append("=" * 60)
+        output.append("LL(1) 文法检测")
+        output.append("=" * 60)
+        
+        if result.is_ll1:
+            output.append("✅ 该文法是 LL(1) 文法！")
+            output.append("\n验证条件：")
+            output.append("  • 无左递归")
+            output.append("  • 无公共左因子")
+            output.append("  • 对于每个含ε产生式的非终结符，FIRST(A) ∩ FOLLOW(A) = ∅")
+        else:
+            output.append("❌ 该文法不是 LL(1) 文法！")
+            output.append("\n冲突信息:")
+            for c in result.conflicts:
+                output.append(f"  • {c}")
+        
+        self.ll1_result.setText("\n".join(output))
+
+    # ==================== LLM增强功能标签页 ====================
+    def create_llm_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
         # 功能选择
         func_group = QGroupBox("🤖 LLM增强功能")
         func_layout = QHBoxLayout()
-    
+        
         self.func_combo = QComboBox()
         self.func_combo.addItems([
             "文法约束生成",
             "语法错误诊断", 
             "反馈格式解析",
             "AST相似度评分",
-            "🤖 AI代码批改"  # 新增
+            "AI代码批改"
         ])
-    
+        
         run_btn = QPushButton("🚀 运行")
         run_btn.clicked.connect(self.run_llm_function)
-    
+        
         func_layout.addWidget(QLabel("选择功能:"))
         func_layout.addWidget(self.func_combo)
         func_layout.addWidget(run_btn)
         func_layout.addStretch()
         func_group.setLayout(func_layout)
-    
+        
         # 输入区域
         input_group = QGroupBox("📝 输入")
         input_layout = QVBoxLayout()
@@ -376,7 +558,7 @@ class MainWindow(QMainWindow):
         self.llm_input.setMaximumHeight(200)
         input_layout.addWidget(self.llm_input)
         input_group.setLayout(input_layout)
-    
+        
         # 输出区域
         output_group = QGroupBox("📊 输出")
         output_layout = QVBoxLayout()
@@ -384,256 +566,51 @@ class MainWindow(QMainWindow):
         self.llm_output.setReadOnly(True)
         output_layout.addWidget(self.llm_output)
         output_group.setLayout(output_layout)
-    
+        
         # 示例按钮
         example_group = QGroupBox("📋 示例")
         example_layout = QHBoxLayout()
-    
+        
         examples = [
             ("约束生成示例", self.set_constraint_example),
             ("错误诊断示例", self.set_diagnosis_example),
             ("反馈解析示例", self.set_feedback_example),
-            ("代码批改示例", self.set_code_example),  # 新增
+            ("代码批改示例", self.set_code_example),
         ]
-    
+        
         for name, func in examples:
             btn = QPushButton(name)
             btn.clicked.connect(func)
             example_layout.addWidget(btn)
-    
+        
         # API配置按钮
         api_btn = QPushButton("⚙️ API配置")
         api_btn.clicked.connect(self.show_api_config)
         example_layout.addWidget(api_btn)
-    
+        
         example_group.setLayout(example_layout)
-    
+        
         layout.addWidget(func_group)
         layout.addWidget(input_group)
         layout.addWidget(output_group)
         layout.addWidget(example_group)
-    
+        
         widget.setLayout(layout)
         return widget
-    
-    def set_code_example(self):
-        """设置代码批改示例"""
-        self.func_combo.setCurrentText("🤖 AI代码批改")
-        self.llm_input.setPlainText('''
-    def factorial(n):
-        if n == 0:
-            return 1
-        result = 1
-        for i in range(1, n+1):
-            result = result * i
-        return result
-    ''')
 
-
-    def show_api_config(self):
-        """显示API配置对话框"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("LLM API配置")
-        dialog.setGeometry(400, 300, 500, 300)
-    
-        layout = QVBoxLayout()
-    
-        # 提供商选择
-        provider_layout = QHBoxLayout()
-        provider_layout.addWidget(QLabel("API提供商:"))
-        provider_combo = QComboBox()
-        provider_combo.addItems(["deepseek", "openai", "qwen", "zhipu"])
-        provider_combo.setCurrentText(self.llm_client.config.provider)
-        provider_layout.addWidget(provider_combo)
-        layout.addLayout(provider_layout)
-    
-        # API Key
-        key_layout = QHBoxLayout()
-        key_layout.addWidget(QLabel("API Key:"))
-        key_input = QLineEdit()
-        key_input.setEchoMode(QLineEdit.Password)
-        key_input.setText(self.llm_client.config.api_key)
-        key_layout.addWidget(key_input)
-        layout.addLayout(key_layout)
-    
-        # API地址
-        url_layout = QHBoxLayout()
-        url_layout.addWidget(QLabel("API地址:"))
-        url_input = QLineEdit()
-        url_input.setText(self.llm_client.config.api_base_url)
-        url_layout.addWidget(url_input)
-        layout.addLayout(url_layout)
-    
-        # 模型
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("模型:"))
-        model_input = QLineEdit()
-        model_input.setText(self.llm_client.config.model)
-        model_layout.addWidget(model_input)
-        layout.addLayout(model_layout)
-    
-        # 按钮
-        btn_layout = QHBoxLayout()
-        save_btn = QPushButton("保存")
-        cancel_btn = QPushButton("取消")
-        test_btn = QPushButton("测试连接")
-    
-        btn_layout.addWidget(save_btn)
-        btn_layout.addWidget(test_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-    
-        status_label = QLabel("")
-        layout.addWidget(status_label)
-    
-        dialog.setLayout(layout)
-    
-        def save_config():
-            self.llm_client.config.provider = provider_combo.currentText()
-            self.llm_client.config.api_key = key_input.text()
-            self.llm_client.config.api_base_url = url_input.text()
-            self.llm_client.config.model = model_input.text()
-            # 更新环境变量
-            os.environ["LLM_API_KEY"] = key_input.text()
-            os.environ["LLM_API_BASE_URL"] = url_input.text()
-            os.environ["LLM_MODEL"] = model_input.text()
-            os.environ["LLM_PROVIDER"] = provider_combo.currentText()
-            status_label.setText("✅ 配置已保存")
-            self.statusBar.showMessage("API配置已更新")
-    
-        def test_connection():
-            status_label.setText("🔄 测试中...")
-            # 简单测试
-            if key_input.text():
-                status_label.setText("✅ API Key已配置，可进行测试")
-            else:
-                status_label.setText("⚠️ 请先配置API Key")
-    
-        save_btn.clicked.connect(save_config)
-        test_btn.clicked.connect(test_connection)
-        cancel_btn.clicked.connect(dialog.reject)
-    
-        dialog.exec_()
-
-
-    def _run_ai_grading(self, input_text: str):
-        """运行AI代码批改"""
-        print("=" * 50)
-        print(">>> _run_ai_grading 被调用 <<<")
-        print(f">>> 输入文本长度: {len(input_text)}")
-        print(f">>> 输入内容前100字符: {input_text[:100]}")
-        print("=" * 50)
-    
-        from llm.llm_client import FeedbackParser
-    
-        print(">>> 导入 FeedbackParser 成功")
-    
-        # 创建反馈解析器
-        parser = FeedbackParser(self.llm_client)
-        print(f">>> 解析器创建成功, mock_mode={self.llm_client.mock_mode}")
-    
-        # 立即显示"处理中"消息
-        self.llm_output.setText("🔄 正在调用AI批改代码，请稍候...\n\n这可能需要几秒钟时间。")
-        self.llm_output.repaint()  # 强制刷新
-        QApplication.processEvents()
-    
-        try:
-            print(">>> 开始调用 evaluate_submission...")
-            result = parser.evaluate_submission(input_text)
-            print(f">>> 调用完成，结果: {result}")
-            print(f">>> 评分: {result.get('score')}")
-            print(f">>> 解析成功: {result.get('parse_success')}")
-        
-            output = f"""
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                         🤖 AI代码批改结果                                       ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
-
-📊 评分: {result.get('score', 'N/A')} / 100
-🏷️ 等级: {result.get('level', 'N/A')}
-
-{'─' * 70}
-
-💬 评语:
-{result.get('comment', '无')}
-
-{'─' * 70}
-
-💡 改进建议:
-{result.get('suggestion', '无')}
-
-{'─' * 70}
-
-📝 发现的问题:
-"""
-            if result.get('errors'):
-                for err in result['errors']:
-                    output += f"  • 行 {err.get('line', '?')}: {err.get('type', 'unknown')} - {err.get('msg', '')}\n"
-            else:
-                output += "  未发现问题，代码质量良好！\n"
-
-            output += f"""
-{'─' * 70}
-
-📋 解析状态: {'✅ 成功' if result.get('parse_success') else '❌ 失败'}
-
-{'─' * 70}
-
-🔧 LLM原始输出:
-{result.get('raw_output', '')[:1000]}{'...' if len(result.get('raw_output', '')) > 1000 else ''}
-"""
-            print(">>> 设置输出文本...")
-            self.llm_output.setText(output)
-            self.statusBar.showMessage("✅ AI代码批改完成")
-            print(">>> 完成!")
-        
-        except Exception as e:
-            import traceback
-            error_detail = traceback.format_exc()
-            print(f">>> 错误: {e}")
-            print(error_detail)
-            self.llm_output.setText(f"❌ 批改失败: {str(e)}\n\n详细信息:\n{error_detail}")
-            self.statusBar.showMessage("❌ AI批改失败")
-
-
-# 更新 run_llm_function 方法
     def run_llm_function(self):
         """运行选中的LLM功能"""
         func = self.func_combo.currentText()
         input_text = self.llm_input.toPlainText().strip()
-    
-        if not input_text:
-            QMessageBox.warning(self, "提示", "请输入内容！")
-            return
-    
-        self.statusBar.showMessage(f"🔄 正在执行 {func}...")
-    
-        if func == "文法约束生成":
-            self._run_constraint_generation(input_text)
-        elif func == "语法错误诊断":
-            self._run_error_diagnosis(input_text)
-        elif func == "反馈格式解析":
-            self._run_feedback_parsing(input_text)
-        elif func == "AST相似度评分":
-            self._run_ast_similarity(input_text)
-        elif func == "🤖 AI代码批改":
-            self._run_ai_grading(input_text)
-
-    def run_llm_function(self):
-        """运行选中的LLM功能"""
-        func = self.func_combo.currentText()
+        
         print(f"选中的功能: '{func}'")
-    
-        input_text = self.llm_input.toPlainText().strip()
-        print(f"输入内容长度: {len(input_text)}")
-    
+        
         if not input_text:
             QMessageBox.warning(self, "提示", "请输入内容！")
             return
-    
+        
         self.statusBar.showMessage(f"🔄 正在执行 {func}...")
-    
-        # 使用包含匹配，更灵活
+        
         if "文法约束" in func:
             self._run_constraint_generation(input_text)
         elif "语法错误" in func:
@@ -643,10 +620,10 @@ class MainWindow(QMainWindow):
         elif "AST" in func:
             self._run_ast_similarity(input_text)
         elif "AI代码批改" in func or "批改" in func:
-            print("匹配: AI代码批改 - 进入分支")
+            print("进入 AI代码批改 分支")
             self._run_ai_grading(input_text)
         else:
-            print(f"没有匹配任何分支! func='{func}'")
+            print(f"未匹配的功能: {func}")
 
     def _run_constraint_generation(self, input_text: str):
         result = self.grammar_constrained.constrain_generation(input_text)
@@ -716,73 +693,148 @@ class MainWindow(QMainWindow):
         self.statusBar.showMessage("✅ 语法错误诊断完成")
 
     def _run_feedback_parsing(self, input_text: str):
-        result = self.feedback_parser.parse(input_text)
+        # 使用 evaluate.py 中的 FeedbackParser
+        from evaluate import FeedbackParser as EvalFeedbackParser
+        from evaluate import LLMClient
         
-        output = f"""
+        temp_client = LLMClient(mock_mode=True)
+        parser = EvalFeedbackParser(temp_client)
+        
+        parse_success, result, error_msg = parser._parse_output(input_text, True)
+        
+        if parse_success:
+            output = f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                         反馈格式解析结果                                        ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
 📊 解析结果:
-• 成功: {'✅' if result.success else '❌'}
-• 分数: {result.score if result.score else '未识别'}
-• 等级: {result.level if result.level else '未识别'}
-• 评语: {result.comment if result.comment else '未识别'}
-• 建议: {result.suggestion if result.suggestion else '未识别'}
+• 成功: ✅
+• 分数: {result.get('score', '未识别')}
+• 等级: {result.get('level', '未识别')}
+• 评语: {result.get('comment', '未识别')}
+• 建议: {result.get('suggestion', '未识别')}
 
 {'─' * 70}
 
 📝 错误列表:
 """
-        for err in result.errors:
-            output += f"  • 行 {err['line']}: {err['type']} - {err['msg']}\n"
-        
-        if not result.errors:
-            output += "  无错误信息\n"
-        
-        if result.error_message:
-            output += f"\n⚠️ 解析错误: {result.error_message}\n"
+            for err in result.get('errors', []):
+                output += f"  • 行 {err.get('line', '?')}: {err.get('type', 'unknown')} - {err.get('msg', '')}\n"
+            if not result.get('errors'):
+                output += "  无错误信息\n"
+        else:
+            output = f"""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                         反馈格式解析结果                                        ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+❌ 解析失败: {error_msg}
+"""
         
         self.llm_output.setText(output)
         self.statusBar.showMessage("✅ 反馈解析完成")
 
     def _run_ast_similarity(self, input_text: str):
-        # 简单的AST相似度演示
-        output = f"""
+        from parser.ast_node import ASTNode
+        
+        # 构建参考AST（基于输入文本）
+        tokens = self.lexical_analyzer.analyze(input_text)[0]
+        parse_result = self.recursive_parser.parse(tokens)
+        
+        if not parse_result.success:
+            self.llm_output.setText("❌ 无法解析输入内容，请确保输入有效的表达式")
+            return
+        
+        reference_ast = parse_result.ast
+        student_ast = reference_ast
+        
+        report = self.ast_similarity.get_similarity_report(student_ast, reference_ast)
+        
+        self.llm_output.setText(f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                         AST相似度评分                                           ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
-📝 输入表达式: {input_text}
+{report}
+        """)
+        self.statusBar.showMessage("✅ AST相似度评分完成")
+
+    def _run_ai_grading(self, input_text: str):
+        """运行AI代码批改"""
+        print("=" * 50)
+        print(">>> _run_ai_grading 被调用 <<<")
+        print(f">>> 输入文本长度: {len(input_text)}")
+        print("=" * 50)
+        
+        from evaluate import FeedbackParser as EvalFeedbackParser
+        
+        # 创建反馈解析器
+        parser = EvalFeedbackParser(self.llm_client)
+        print(f">>> 解析器创建成功, mock_mode={self.llm_client.mock_mode}")
+        
+        self.llm_output.setText("🔄 正在调用AI批改代码，请稍候...\n\n这可能需要几秒钟时间。")
+        self.llm_output.repaint()
+        QApplication.processEvents()
+        
+        try:
+            print(">>> 开始调用 evaluate_submission...")
+            result = parser.evaluate_submission(input_text, enable_extensions=True)
+            print(f">>> 调用完成，结果: {result}")
+            print(f">>> 评分: {result.get('score')}")
+            print(f">>> 解析成功: {result.get('parse_success')}")
+            
+            output = f"""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                         🤖 AI代码批改结果                                       ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+📊 评分: {result.get('score', 'N/A')} / 100
+🏷️ 等级: {result.get('level', 'N/A')}
 
 {'─' * 70}
 
-📊 相似度分析说明:
-
-AST相似度评分基于树编辑距离算法，用于比较两棵抽象语法树的结构相似程度。
-
-评分范围: 0% - 100%
-• 90% - 100%: 优秀，表达式结构完全正确
-• 70% - 89%: 良好，有小部分差异
-• 50% - 69%: 一般，存在较多差异
-• 0% - 49%: 需改进，表达式结构差异较大
+💬 评语:
+{result.get('comment', '无')}
 
 {'─' * 70}
 
-💡 使用说明:
-1. 此功能用于评估学生答案与参考答案的相似度
-2. 可应用于客观题之外的过程性评分
-3. 算法实现: 简化版Zhang-Shasha树编辑距离
+💡 改进建议:
+{result.get('suggestion', '无')}
 
-示例参考表达式:
-• 标准答案: a + b * c
-• 学生答案: a + b * c  (相似度 100%)
-• 学生答案: (a + b) * c (相似度 约 85%)
+{'─' * 70}
+
+📝 发现的问题:
 """
-        self.llm_output.setText(output)
-        self.statusBar.showMessage("✅ AST相似度分析完成")
+            if result.get('errors'):
+                for err in result['errors']:
+                    output += f"  • 行 {err.get('line', '?')}: {err.get('type', 'unknown')} - {err.get('msg', '')}\n"
+            else:
+                output += "  未发现问题，代码质量良好！\n"
+
+            output += f"""
+{'─' * 70}
+
+📋 解析状态: {'✅ 成功' if result.get('parse_success') else '❌ 失败'}
+
+{'─' * 70}
+
+🔧 LLM原始输出:
+{result.get('raw_output', '')[:800]}{'...' if len(result.get('raw_output', '')) > 800 else ''}
+"""
+            self.llm_output.setText(output)
+            self.statusBar.showMessage("✅ AI代码批改完成")
+            
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f">>> 错误: {e}")
+            print(error_detail)
+            self.llm_output.setText(f"❌ 批改失败: {str(e)}\n\n详细信息:\n{error_detail}")
+            self.statusBar.showMessage("❌ AI批改失败")
 
     def set_constraint_example(self):
+        self.func_combo.setCurrentText("文法约束生成")
         self.llm_input.setPlainText("""
 feedback {
     score: 85
@@ -798,6 +850,7 @@ feedback {
 """)
 
     def set_diagnosis_example(self):
+        self.func_combo.setCurrentText("语法错误诊断")
         self.llm_input.setPlainText("""
 int main() {
     int x = 10;
@@ -809,222 +862,131 @@ int main() {
 """)
 
     def set_feedback_example(self):
+        self.func_combo.setCurrentText("反馈格式解析")
         self.llm_input.setPlainText("""
-feedback {
-    score: 92;
-    level: high;
-    comment {
-        text: "代码结构清晰，算法正确。";
-        suggestion: "考虑添加更多的边界测试用例。";
+FEEDBACK {
+    SCORE: 92;
+    LEVEL: high;
+    COMMENT {
+        TEXT: "代码结构清晰，算法正确。";
+        SUGGESTION: "考虑添加更多的边界测试用例。";
     }
-    errors [
-        error(line: 15, type: warning, msg: "未使用的变量");
-        error(line: 28, type: style, msg: "缩进不一致");
+    ERRORS [
+        ERROR(line: 15, type: warning, msg: "未使用的变量");
+        ERROR(line: 28, type: style, msg: "缩进不一致");
     ]
 }
 """)
-    def create_ll1_tab(self):
-        """创建LL(1)分析标签页"""
-        widget = QWidget()
+
+    def set_code_example(self):
+        self.func_combo.setCurrentText("AI代码批改")
+        self.llm_input.setPlainText("""
+def factorial(n):
+    if n == 0:
+        return 1
+    result = 1
+    for i in range(1, n+1):
+        result = result * i
+    return result
+""")
+
+    def show_api_config(self):
+        """显示API配置对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("LLM API配置")
+        dialog.setGeometry(400, 300, 500, 300)
+        
         layout = QVBoxLayout()
-    
-        # 文法选择
-        select_group = QGroupBox("📖 选择文法")
-        select_layout = QHBoxLayout()
-    
-        self.grammar_combo = QComboBox()
-        self.grammar_combo.addItems([
-            "反馈格式文法（作业）",
-            "算术表达式文法"
-        ])
-        self.grammar_combo.currentTextChanged.connect(self.on_grammar_changed)
-    
-        select_layout.addWidget(QLabel("文法类型:"))
-        select_layout.addWidget(self.grammar_combo)
-        select_layout.addStretch()
-        select_group.setLayout(select_layout)
-    
-        # 自定义文法输入
-        custom_group = QGroupBox("✏️ 自定义文法（可选）")
-        custom_layout = QVBoxLayout()
-        self.custom_grammar_input = QPlainTextEdit()
-        self.custom_grammar_input.setPlaceholderText(
-            "请输入文法产生式，每行一条，使用 -> 或 →\n"
-            "示例：\n"
-            "S -> a S | b\n"
-            "E -> E + T | T\n"
-            "T -> F\n"
-            "F -> ( E ) | id"
-        )
-        self.custom_grammar_input.setMaximumHeight(150)
-        use_custom_btn = QPushButton("使用自定义文法")
-        use_custom_btn.clicked.connect(self.use_custom_grammar)
-        custom_layout.addWidget(self.custom_grammar_input)
-        custom_layout.addWidget(use_custom_btn)
-        custom_group.setLayout(custom_layout)
-    
-        # 分析按钮
-        analyze_btn = QPushButton("🔍 执行LL(1)分析")
-        analyze_btn.setStyleSheet("background-color: #48bb78; font-size: 14px; padding: 10px;")
-        analyze_btn.clicked.connect(self.run_ll1_analysis)
-    
-        # 结果显示区域
-        result_group = QGroupBox("📊 分析结果")
-        result_layout = QVBoxLayout()
-        self.ll1_result = QTextEdit()
-        self.ll1_result.setReadOnly(True)
-        self.ll1_result.setFont(QFont("Consolas", 11))
-        result_layout.addWidget(self.ll1_result)
-        result_group.setLayout(result_layout)
-    
-        # 布局
-        layout.addWidget(select_group)
-        layout.addWidget(custom_group)
-        layout.addWidget(analyze_btn)
-        layout.addWidget(result_group)
-    
-        widget.setLayout(layout)
-    
-        # 默认加载反馈格式文法
-        self.current_analyzer = LL1Analyzer()
-        self.current_analyzer.set_feedback_grammar()
-        self.display_ll1_result()
-    
-        return widget
-
-    def on_grammar_changed(self, grammar_type: str):
-        """文法类型改变时的处理"""
-        self.current_analyzer = LL1Analyzer()
-    
-        if grammar_type == "反馈格式文法（作业）":
-            self.current_analyzer.set_feedback_grammar()
-        else:
-            self.current_analyzer.set_expression_grammar()
-    
-        self.display_ll1_result()
-
-    def use_custom_grammar(self):
-        """使用自定义文法"""
-        grammar_text = self.custom_grammar_input.toPlainText().strip()
-        if not grammar_text:
-            QMessageBox.warning(self, "提示", "请输入文法产生式！")
-            return
-    
-        try:
-            self.current_analyzer = LL1Analyzer()
-            # 尝试解析开始符号（取第一个产生式的左部）
-            first_line = grammar_text.split('\n')[0]
-            if '->' in first_line:
-                start = first_line.split('->')[0].strip()
-            elif '→' in first_line:
-                start = first_line.split('→')[0].strip()
+        
+        provider_layout = QHBoxLayout()
+        provider_layout.addWidget(QLabel("API提供商:"))
+        provider_combo = QComboBox()
+        provider_combo.addItems(["deepseek", "openai", "qwen", "zhipu"])
+        provider_combo.setCurrentText(self.llm_client.config.provider)
+        provider_layout.addWidget(provider_combo)
+        layout.addLayout(provider_layout)
+        
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(QLabel("API Key:"))
+        key_input = QLineEdit()
+        key_input.setEchoMode(QLineEdit.Password)
+        key_input.setText(self.llm_client.config.api_key)
+        key_layout.addWidget(key_input)
+        layout.addLayout(key_layout)
+        
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("API地址:"))
+        url_input = QLineEdit()
+        url_input.setText(self.llm_client.config.api_base_url)
+        url_layout.addWidget(url_input)
+        layout.addLayout(url_layout)
+        
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("模型:"))
+        model_input = QLineEdit()
+        model_input.setText(self.llm_client.config.model)
+        model_layout.addWidget(model_input)
+        layout.addLayout(model_layout)
+        
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("保存")
+        cancel_btn = QPushButton("取消")
+        test_btn = QPushButton("测试连接")
+        
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(test_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        status_label = QLabel("")
+        layout.addWidget(status_label)
+        
+        dialog.setLayout(layout)
+        
+        def save_config():
+            self.llm_client.config.provider = provider_combo.currentText()
+            self.llm_client.config.api_key = key_input.text()
+            self.llm_client.config.api_base_url = url_input.text()
+            self.llm_client.config.model = model_input.text()
+            os.environ["LLM_API_KEY"] = key_input.text()
+            os.environ["LLM_API_BASE_URL"] = url_input.text()
+            os.environ["LLM_MODEL"] = model_input.text()
+            os.environ["LLM_PROVIDER"] = provider_combo.currentText()
+            status_label.setText("✅ 配置已保存")
+            self.statusBar.showMessage("API配置已更新")
+        
+        def test_connection():
+            status_label.setText("🔄 测试中...")
+            if key_input.text():
+                status_label.setText("✅ API Key已配置，可进行测试")
             else:
-                start = "S"
+                status_label.setText("⚠️ 请先配置API Key")
         
-            self.current_analyzer.set_grammar(grammar_text, start)
-            self.display_ll1_result()
+        save_btn.clicked.connect(save_config)
+        test_btn.clicked.connect(test_connection)
+        cancel_btn.clicked.connect(dialog.reject)
         
-            # 切换到自定义选项
-            self.grammar_combo.blockSignals(True)
-            self.grammar_combo.setCurrentText("自定义文法")
-            self.grammar_combo.blockSignals(False)
-        
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"文法解析失败: {str(e)}")
+        dialog.exec_()
 
-    def run_ll1_analysis(self):
-        """执行LL(1)分析"""
-        self.statusBar.showMessage("🔄 正在执行LL(1)分析...")
-    
-        # 获取当前选中的文法类型
-        grammar_type = self.grammar_combo.currentText()
-    
-        # 重新创建分析器
-        self.current_analyzer = LL1Analyzer()
-    
-        if grammar_type == "反馈格式文法（作业）":
-            self.current_analyzer.set_feedback_grammar()
-        elif grammar_type == "算术表达式文法":
-            self.current_analyzer.set_expression_grammar()
-        else:
-            # 自定义文法
-            custom_text = self.custom_grammar_input.toPlainText().strip()
-            if custom_text:
-                try:
-                    first_line = custom_text.split('\n')[0]
-                    if '->' in first_line:
-                        start = first_line.split('->')[0].strip()
-                    elif '→' in first_line:
-                        start = first_line.split('→')[0].strip()
-                    else:
-                        start = "S"
-                    self.current_analyzer.set_grammar(custom_text, start)
-                except Exception as e:
-                    self.ll1_result.setText(f"❌ 文法解析失败: {str(e)}")
-                    self.statusBar.showMessage("❌ 文法解析失败")
-                    return
-            else:
-                self.current_analyzer.set_feedback_grammar()
-    
-        self.display_ll1_result()
-        self.statusBar.showMessage("✅ LL(1)分析完成")
-
-    def display_ll1_result(self):
-        """显示LL(1)分析结果"""
-        result = self.current_analyzer.analyze()
-    
-        output = []
-    
-        # 文法信息
-        output.append(result.grammar_info)
-        output.append("")
-    
-        # FIRST集
-        output.append(self.current_analyzer.print_first_sets())
-        output.append("")
-    
-        # FOLLOW集
-        output.append(self.current_analyzer.print_follow_sets())
-        output.append("")
-    
-        # 预测分析表
-        output.append(self.current_analyzer.print_predict_table())
-        output.append("")
-    
-        # LL(1)检测结果
-        output.append("=" * 60)
-        output.append("LL(1) 文法检测")
-        output.append("=" * 60)
-    
-        if result.is_ll1:
-            output.append("✅ 该文法是 LL(1) 文法！")
-            output.append("\n验证条件：")
-            output.append("  • 无左递归")
-            output.append("  • 无公共左因子")
-            output.append("  • 对于每个含ε产生式的非终结符，FIRST(A) ∩ FOLLOW(A) = ∅")
-        else:
-            output.append("❌ 该文法不是 LL(1) 文法！")
-            output.append("\n冲突信息:")
-            for c in result.conflicts:
-                output.append(f"  • {c}")
-    
-        self.ll1_result.setText("\n".join(output))
-    
+    # ==================== 语义分析标签页（选做+5分）====================
     def create_semantic_tab(self):
         """创建语义分析标签页（选做+5分）"""
         widget = QWidget()
         layout = QVBoxLayout()
-    
+        
         input_group = QGroupBox("📝 输入代码")
         input_layout = QVBoxLayout()
         self.semantic_input = QPlainTextEdit()
         self.semantic_input.setPlaceholderText(
             "请输入代码进行语义分析，检测：\n\n"
             "1. 变量重定义错误\n"
-            "2. 未声明引用错误\n\n"
+            "2. 未声明引用错误\n"
+            "3. 未初始化使用错误\n\n"
             "示例代码：\n"
             "int x = 10;\n"
             "int x = 20;  // 重定义错误\n"
+            "int a;       // 声明未初始化\n"
+            "int b = a;   // 使用未初始化的变量\n"
             "y = x + 5;   // 未声明引用错误"
         )
         analyze_btn = QPushButton("🔍 语义分析")
@@ -1032,14 +994,14 @@ feedback {
         input_layout.addWidget(self.semantic_input)
         input_layout.addWidget(analyze_btn)
         input_group.setLayout(input_layout)
-    
+        
         output_group = QGroupBox("📊 分析结果")
         output_layout = QVBoxLayout()
         self.semantic_output = QTextEdit()
         self.semantic_output.setReadOnly(True)
         output_layout.addWidget(self.semantic_output)
         output_group.setLayout(output_layout)
-    
+        
         layout.addWidget(input_group)
         layout.addWidget(output_group)
         widget.setLayout(layout)
@@ -1051,68 +1013,15 @@ feedback {
         if not code:
             QMessageBox.warning(self, "提示", "请输入代码！")
             return
-    
+        
         self.statusBar.showMessage("🔍 正在执行语义分析...")
-    
-        # 简化的AST构建（演示用）
-        from semantic import SemanticAnalyzer, SymbolKind, DataType
-    
-        # 创建模拟AST进行演示
+        
         analyzer = SemanticAnalyzer()
-    
-        # 模拟解析代码并构建符号表
-        lines = code.split('\n')
-        declarations = {}
-    
-        for line_num, line in enumerate(lines, 1):
-            line = line.strip()
-            if not line:
-                continue
-        
-            # 检测变量声明
-            if 'int ' in line or 'float ' in line or 'var ' in line:
-                # 提取变量名
-                import re
-                match = re.search(r'(?:int|float|var)\s+([a-zA-Z_][a-zA-Z0-9_]*)', line)
-                if match:
-                    var_name = match.group(1)
-                    if var_name in declarations:
-                        analyzer.symbol_table.errors.append(
-                            f"变量重定义错误: '{var_name}' 已在第 {declarations[var_name]} 行定义"
-                        )
-                    else:
-                        declarations[var_name] = line_num
-                        analyzer.symbol_table.declare(
-                            name=var_name,
-                            kind=SymbolKind.VARIABLE,
-                            data_type=DataType.INT,
-                            line=line_num,
-                            column=1
-                        )
-        
-            # 检测变量使用
-            import re
-            # 查找赋值左边的变量（声明/初始化）
-            assign_match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*=', line)
-            if assign_match:
-                var_name = assign_match.group(1)
-                if var_name in declarations:
-                    # 标记已初始化
-                    pass
-        
-            # 查找单独使用的变量
-            use_match = re.findall(r'[^a-zA-Z_]([a-zA-Z_][a-zA-Z0-9_]*)[^a-zA-Z_]', line)
-            for var_name in use_match:
-                if var_name not in ['int', 'float', 'var', 'if', 'else', 'while', 'for', 'return']:
-                    if var_name not in declarations:
-                        analyzer.symbol_table.errors.append(
-                            f"未声明引用错误: 变量 '{var_name}' 在第 {line_num} 行未声明"
-                        )
-    
+        analyzer.analyze_code(code)
         output = analyzer.get_report()
         self.semantic_output.setText(output)
-    
-        if analyzer.symbol_table.errors:
-            self.statusBar.showMessage(f"⚠️ 发现 {len(analyzer.symbol_table.errors)} 个语义错误")
+        
+        if analyzer.errors:
+            self.statusBar.showMessage(f"⚠️ 发现 {len(set(analyzer.errors))} 个语义错误")
         else:
             self.statusBar.showMessage("✅ 语义分析完成，无错误")
