@@ -43,3 +43,13 @@ config.local.py
 *.egg-info/
 dist/
 build/
+# 实验脚本和结果
+experiment_*.py
+experiment_*_results.txt
+
+# 生成的图表
+chart_*.png
+
+# 测试文件
+test.py
+debug.py

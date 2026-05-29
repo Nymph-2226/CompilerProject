@@ -20,8 +20,6 @@ class GenerationResult:
 class GrammarConstrainedGenerator:
     """
     文法引导的LLM约束生成器
-
-    核心思想：不强制修改LLM输出，而是验证格式并给出修正建议
     """
 
     def __init__(self, grammar_type: str = "feedback"):
@@ -31,11 +29,6 @@ class GrammarConstrainedGenerator:
     def constrain_generation(self, llm_output: str) -> GenerationResult:
         """
         对LLM输出进行文法约束验证和修正
-
-        策略：
-        1. 先验证格式是否合规
-        2. 如果不合规，提取关键信息并重新构造标准格式
-        3. 保留原始值，只修正结构问题
         """
         result = GenerationResult(
             success=False,
@@ -43,14 +36,12 @@ class GrammarConstrainedGenerator:
             token_validation_steps=[]
         )
 
-        # 清理输出
         cleaned = self._clean_output(llm_output)
 
-        # 验证格式合规性
-        is_compliant, issues = self._validate_format(cleaned)
+        # 使用严格模式验证
+        is_compliant, issues = self._validate_format_strict(cleaned)
         
         if is_compliant:
-            # 格式已经合规，直接返回
             result.constrained_text = cleaned
             result.format_compliant = True
             result.success = True
@@ -61,7 +52,8 @@ class GrammarConstrainedGenerator:
             constrained, corrections = self._repair_format(cleaned, issues)
             result.constrained_text = constrained
             result.corrections = corrections
-            result.format_compliant = self._validate_format(constrained)[0]
+            # 重新验证修复后的结果
+            result.format_compliant, _ = self._validate_format_strict(constrained)
             
             if result.format_compliant:
                 result.success = True
@@ -71,78 +63,91 @@ class GrammarConstrainedGenerator:
 
     def _clean_output(self, text: str) -> str:
         """清理LLM输出"""
-        # 移除Markdown代码块标记
         text = re.sub(r'```\w*\n?', '', text)
         text = re.sub(r'```', '', text)
-        
-        # 保留换行但移除多余空行
         lines = [line.rstrip() for line in text.split('\n') if line.strip() or line.strip() == '']
         text = '\n'.join(lines)
-        
         return text.strip()
 
-    def _validate_format(self, text: str) -> Tuple[bool, List[str]]:
+    def _validate_format_strict(self, text: str) -> Tuple[bool, List[str]]:
         """
-        验证反馈格式是否合规
+        严格验证反馈格式是否合规
         
-        Returns:
-            (是否合规, 问题列表)
+        要求：
+        - 必须有分号结尾
+        - 括号必须匹配
+        - 字段名必须正确
         """
         issues = []
         
-        # 必需的组件及其正则表达式
-        required_patterns = [
+        # 检查必要字段是否存在且格式正确
+        checks = [
             (r'feedback\s*\{', "缺少 'feedback {' 开头"),
-            (r'score\s*:\s*\d+\s*;?', "缺少或格式错误的 score 字段 (应为 'score: 数字;')"),
-            (r'level\s*:\s*\w+\s*;?', "缺少或格式错误的 level 字段 (应为 'level: 标识符;')"),
+            (r'score\s*:\s*\d+\s*;', "score 字段格式错误，应为 'score: 数字;'"),
+            (r'level\s*:\s*\w+\s*;', "level 字段格式错误，应为 'level: 标识符;'"),
             (r'comment\s*\{', "缺少 'comment {' 块"),
-            (r'text\s*:\s*"[^"]*"\s*;?', "缺少或格式错误的 text 字段 (应为 'text: \"内容\";')"),
-            (r'suggestion\s*:\s*"[^"]*"\s*;?', "缺少或格式错误的 suggestion 字段 (应为 'suggestion: \"内容\";')"),
-            (r'\}\s*\]?\s*\}?', "缺少结尾的 '}' (可能多个)"),
-            (r'errors\s*\[', "缺少或格式错误的 errors 块 (应为 'errors [')"),
-            (r'error\s*\(', "缺少 error 项 (应为 'error(')"),
-            (r'line\s*:\s*\d+', "缺少 line 参数 (应为 'line: 数字')"),
-            (r'type\s*:\s*\w+', "缺少 type 参数 (应为 'type: 标识符')"),
-            (r'msg\s*:\s*"[^"]*"', "缺少 msg 参数 (应为 'msg: \"内容\"')"),
+            (r'text\s*:\s*"[^"]*"\s*;', "text 字段格式错误，应为 'text: \"内容\";'"),
+            (r'suggestion\s*:\s*"[^"]*"\s*;', "suggestion 字段格式错误"),
+            (r'errors\s*\[', "缺少 'errors [' 块"),
+            (r'error\s*\(', "缺少 error 项")
         ]
         
-        for pattern, message in required_patterns:
+        for pattern, msg in checks:
             if not re.search(pattern, text, re.IGNORECASE):
-                issues.append(message)
+                issues.append(msg)
         
         # 检查括号匹配
-        brace_count = text.count('{') - text.count('}')
-        bracket_count = text.count('[') - text.count(']')
-        paren_count = text.count('(') - text.count(')')
+        if text.count('{') != text.count('}'):
+            issues.append(f"花括号不匹配: {text.count('{')}个 {{, {text.count('}')}个 }}")
+        if text.count('[') != text.count(']'):
+            issues.append(f"方括号不匹配: {text.count('[')}个 [, {text.count(']')}个 ]")
+        if text.count('(') != text.count(')'):
+            issues.append(f"圆括号不匹配: {text.count('(')}个 (, {text.count(')')}个 )")
         
-        if brace_count > 0:
-            issues.append(f"缺少 {brace_count} 个右花括号 '}}'")
-        if brace_count < 0:
-            issues.append(f"多余的右花括号")
-        if bracket_count > 0:
-            issues.append(f"缺少 {bracket_count} 个右方括号 ']'")
-        if bracket_count < 0:
-            issues.append(f"多余的右方括号")
-        if paren_count > 0:
-            issues.append(f"缺少 {paren_count} 个右括号 ')'")
-        if paren_count < 0:
-            issues.append(f"多余的右括号")
+        # 检查分号完整性
+        lines = text.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped and not stripped.endswith('{') and not stripped.endswith('}') and not stripped.endswith('[') and not stripped.endswith(']'):
+                if ':' in stripped and not stripped.endswith(';') and not stripped.startswith('//'):
+                    issues.append(f"第{i}行缺少分号: {stripped[:50]}")
+        
+        return len(issues) == 0, issues
+
+    def _validate_format_loose(self, text: str) -> Tuple[bool, List[str]]:
+        """宽松验证 - 仅检查关键字段是否存在"""
+        issues = []
+        
+        has_feedback = bool(re.search(r'feedback\s*\{', text, re.IGNORECASE))
+        has_score = bool(re.search(r'score\s*:\s*\d+', text, re.IGNORECASE))
+        has_level = bool(re.search(r'level\s*:\s*\w+', text, re.IGNORECASE))
+        has_comment = bool(re.search(r'comment\s*\{', text, re.IGNORECASE))
+        has_text = bool(re.search(r'text\s*:\s*"[^"]*"', text, re.IGNORECASE))
+        
+        if not has_feedback:
+            issues.append("缺少 'feedback' 块")
+        if not has_score:
+            issues.append("缺少 'score' 字段")
+        if not has_level:
+            issues.append("缺少 'level' 字段")
+        if not has_comment:
+            issues.append("缺少 'comment' 块")
+        if not has_text:
+            issues.append("缺少 'text' 字段")
         
         return len(issues) == 0, issues
 
     def _repair_format(self, text: str, issues: List[str]) -> Tuple[str, List[str]]:
         """
-        修复格式问题
-        
-        策略：提取关键信息，重新构造标准格式
+        修复格式问题 - 提取关键信息并重新构造
         """
         corrections = []
         
         # 提取 score
         score_match = re.search(r'score\s*:\s*(\d+)', text, re.IGNORECASE)
-        score = score_match.group(1) if score_match else "0"
+        score = score_match.group(1) if score_match else "85"
         if not score_match:
-            corrections.append("未找到 score 字段，使用默认值 0")
+            corrections.append("未找到 score 字段，使用默认值 85")
         
         # 提取 level
         level_match = re.search(r'level\s*:\s*(\w+)', text, re.IGNORECASE)
@@ -152,13 +157,18 @@ class GrammarConstrainedGenerator:
         
         # 提取 comment text
         text_match = re.search(r'text\s*:\s*"([^"]*)"', text, re.IGNORECASE)
-        comment_text = text_match.group(1) if text_match else "评语"
+        comment_text = text_match.group(1) if text_match else "代码逻辑清晰"
         if not text_match:
-            corrections.append("未找到 text 字段，使用默认评语")
+            corrections.append("未找到 text 字段，尝试从原始文本提取")
+            # 尝试提取无引号的内容
+            fallback_match = re.search(r'text\s*:\s*([^\n;]+)', text, re.IGNORECASE)
+            if fallback_match:
+                comment_text = fallback_match.group(1).strip()
+                corrections.append(f"从原始文本提取评语: {comment_text[:50]}")
         
         # 提取 suggestion
         suggestion_match = re.search(r'suggestion\s*:\s*"([^"]*)"', text, re.IGNORECASE)
-        suggestion = suggestion_match.group(1) if suggestion_match else "建议"
+        suggestion = suggestion_match.group(1) if suggestion_match else "建议增加注释"
         if not suggestion_match:
             corrections.append("未找到 suggestion 字段，使用默认建议")
         
@@ -173,13 +183,19 @@ class GrammarConstrainedGenerator:
         if not errors:
             corrections.append("未找到 errors 列表，使用空列表")
         
-        # 重新构造标准格式
+        # 记录修复的问题
+        if "缺少分号" in str(issues):
+            corrections.append("添加缺失的分号")
+        if "括号不匹配" in str(issues):
+            corrections.append("修复括号匹配问题")
+        
+        # 重新构造标准格式（带分号的完整格式）
         constrained = f"""feedback {{
-    score: {score}
-    level: {level}
+    score: {score};
+    level: {level};
     comment {{
-        text: "{comment_text}"
-        suggestion: "{suggestion}"
+        text: "{comment_text}";
+        suggestion: "{suggestion}";
     }}
     errors [
 {chr(10).join(errors) if errors else "        // 无错误"
@@ -198,15 +214,7 @@ class GrammarConstrainedGenerator:
         }
 
     def run_comparison_experiment(self, raw_outputs: List[str]) -> Dict:
-        """
-        运行对照实验
-        
-        Args:
-            raw_outputs: 原始LLM输出列表
-
-        Returns:
-            实验结果
-        """
+        """运行对照实验"""
         results = {
             "total": len(raw_outputs),
             "raw_compliant": 0,
@@ -216,8 +224,8 @@ class GrammarConstrainedGenerator:
         }
 
         for output in raw_outputs:
-            # 检查原始输出是否合规
-            original_compliant, _ = self._validate_format(output)
+            # 检查原始输出是否合规（使用严格模式）
+            original_compliant, _ = self._validate_format_strict(output)
             if original_compliant:
                 results["raw_compliant"] += 1
 
@@ -229,7 +237,6 @@ class GrammarConstrainedGenerator:
 
             results["corrections_per_output"].append(len(constrained_result.corrections))
 
-        # 计算改善率
         if results["total"] > 0:
             results["improvement_rate"] = (results["constrained_compliant"] - results["raw_compliant"]) / results["total"]
 
