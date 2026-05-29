@@ -1,4 +1,4 @@
-# semantic/symbol_table.py - 完整版
+# semantic/symbol_table.py - 完整修复版
 
 import re
 from typing import Dict, List, Optional, Set, Tuple
@@ -110,32 +110,48 @@ class SemanticAnalyzer:
                         initialized=initialized
                     )
         
-        # 第二遍：检查变量使用
+        # 第二遍：检查变量使用（包括声明语句右侧的变量）
         for line_num, line in enumerate(lines, 1):
             line = line.strip()
             if not line or line.startswith('//'):
                 continue
             
-            # 跳过声明语句本身（已经在第一遍处理）
-            if re.match(r'(int|float|var|double|char|bool)\s+', line):
+            keywords = self._get_keywords()
+            
+            # 处理带初始化的声明语句：int x = expr
+            # 检查右侧表达式中的变量是否已声明
+            init_declare_match = re.match(r'(int|float|var|double|char|bool)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)$', line)
+            if init_declare_match:
+                var_name = init_declare_match.group(2)
+                right_expr = init_declare_match.group(3).rstrip(';')
+                
+                # 提取右侧表达式中的所有标识符
+                identifiers = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', right_expr)
+                
+                for ident in identifiers:
+                    # 跳过关键字和自身变量
+                    if ident in keywords or ident == var_name:
+                        continue
+                    # 检查变量是否已声明
+                    if ident not in self.symbols:
+                        self.errors.append(
+                            f"未声明引用错误: 变量 '{ident}' 在第 {line_num} 行未声明"
+                        )
+                continue  # 处理完初始化声明，跳过后续检查
+            
+            # 跳过无初始化的普通声明语句（int x;）
+            if re.match(r'(int|float|var|double|char|bool)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*;?$', line):
                 continue
             
+            # 处理普通语句（赋值、表达式、return等）
             # 提取所有标识符
             identifiers = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', line)
-            keywords = {
-                'int', 'float', 'var', 'double', 'char', 'bool', 'void',
-                'if', 'else', 'while', 'for', 'do', 'break', 'continue',
-                'return', 'include', 'using', 'namespace', 'std', 'cout', 
-                'cin', 'main', 'true', 'false', 'NULL', 'nullptr',
-                'printf', 'scanf', 'sizeof', 'struct', 'class', 'public',
-                'private', 'protected', 'virtual', 'static', 'const'
-            }
             
             for ident in identifiers:
                 if ident in keywords:
                     continue
                 
-                # 检查是否是赋值语句的左边
+                # 检查是否是赋值语句的左边（左值不需要检查未声明，因为会被第一遍收集）
                 is_left_side = False
                 if re.match(rf'^{ident}\s*=', line):
                     is_left_side = True
@@ -156,6 +172,17 @@ class SemanticAnalyzer:
                     )
         
         return len(self.errors) == 0
+    
+    def _get_keywords(self) -> Set[str]:
+        """获取关键字集合"""
+        return {
+            'int', 'float', 'var', 'double', 'char', 'bool', 'void',
+            'if', 'else', 'while', 'for', 'do', 'break', 'continue',
+            'return', 'include', 'using', 'namespace', 'std', 'cout', 
+            'cin', 'main', 'true', 'false', 'NULL', 'nullptr',
+            'printf', 'scanf', 'sizeof', 'struct', 'class', 'public',
+            'private', 'protected', 'virtual', 'static', 'const'
+        }
     
     def get_report(self) -> str:
         """获取分析报告"""
@@ -201,3 +228,6 @@ def analyze_semantic(code: str) -> Tuple[bool, str, List[str]]:
     is_valid = analyzer.analyze_code(code)
     report = analyzer.get_report()
     return is_valid, report, analyzer.errors
+
+
+__all__ = ['SemanticAnalyzer', 'Symbol', 'SymbolKind', 'DataType', 'SymbolTable', 'analyze_semantic']

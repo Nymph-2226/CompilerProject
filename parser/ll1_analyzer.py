@@ -107,24 +107,59 @@ class LL1Analyzer:
         self._init_follow()
     
     def set_feedback_grammar(self):
-        """设置反馈格式文法（作业中的文法）"""
+        """设置反馈格式文法 - 符合作业规范的 LL(1) 版本"""
         grammar_text = """
-# 反馈格式文法
-Feedback -> FEEDBACK { FieldList }
-FieldList -> Field FieldList | ε
-Field -> ScoreField | LevelField | CommentBlock | ErrorList
-ScoreField -> SCORE : NUMBER ;
-LevelField -> LEVEL : IDENT ;
-CommentBlock -> COMMENT { CommentContent }
+# 反馈格式文法（右递归版本，消除左递归）
+Feedback -> FEEDBACK LBRACE FieldList RBRACE
+
+# 字段列表（零个或多个字段）
+FieldList -> Field FieldRest
+FieldRest -> Field FieldRest | EPSILON
+
+# 字段类型
+Field -> ScoreField
+Field -> LevelField
+Field -> CommentField
+Field -> ErrorsField
+
+# 简单字段
+ScoreField -> SCORE COLON NUMBER SEMICOLON
+LevelField -> LEVEL COLON IDENT SEMICOLON
+
+# 评论块
+CommentField -> COMMENT LBRACE CommentContent RBRACE
 CommentContent -> TextField SuggestionField
-TextField -> TEXT : STRING ;
-SuggestionField -> SUGGESTION : STRING ;
-ErrorList -> ERRORS [ ErrorItems ]
-ErrorItems -> ErrorItem ErrorItems | ε
-ErrorItem -> ERROR ( ErrorParams ) ;
-ErrorParams -> ParamList
-ParamList -> Param , ParamList | Param
-Param -> line : NUMBER | type : IDENT | msg : STRING
+TextField -> TEXT COLON STRING SEMICOLON
+SuggestionField -> SUGGESTION COLON STRING SEMICOLON
+
+# 错误列表
+ErrorsField -> ERRORS LBRACKET ErrorItems RBRACKET
+ErrorItems -> ErrorItem ErrorItemsRest
+ErrorItemsRest -> ErrorItem ErrorItemsRest | EPSILON
+
+# 单个错误项
+ErrorItem -> ERROR LPAREN ErrorParams RPAREN SEMICOLON
+
+# 错误参数（用逗号分隔）- 右递归形式
+ErrorParams -> Param ParamRest
+ParamRest -> COMMA Param ParamRest | EPSILON
+
+# 参数类型
+Param -> LINE COLON NUMBER
+Param -> TYPE COLON IDENT
+Param -> MSG COLON STRING
+
+# 终结符定义
+LBRACE -> '{'
+RBRACE -> '}'
+LBRACKET -> '['
+RBRACKET -> ']'
+LPAREN -> '('
+RPAREN -> ')'
+COLON -> ':'
+SEMICOLON -> ';'
+COMMA -> ','
+EPSILON -> ε
 """
         self.set_grammar(grammar_text, "Feedback")
     

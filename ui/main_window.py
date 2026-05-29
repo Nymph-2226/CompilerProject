@@ -9,21 +9,22 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 
 # 导入各个模块
-from lexer import LexicalAnalyzer
-from grammar import ImprovedGrammar, ChomskyClassifier, HandleAnalyzer
+from lexer.lexical_analyzer import LexicalAnalyzer
+from grammar.improved_grammar import ImprovedGrammar
+from grammar.chomsky_classifier import ChomskyClassifier
+from grammar.handle_analyzer import HandleAnalyzer
 from parser.recursive_descent import RecursiveDescentParser
-from parser.error_recovery import ErrorRecovery, ParseErrorInfo
+from parser.error_recovery import ErrorRecovery, ParseErrorInfo  # ✅ 从这里导入
 from parser.ast_similarity import ASTSimilarity
 from parser.ll1_analyzer import LL1Analyzer
 from llm.llm_client import LLMClient
 from llm.grammar_constrained import GrammarConstrainedGenerator
-from llm.error_diagnosis import ErrorDiagnosis
+from llm.error_diagnosis import ErrorDiagnosis  # ✅ 使用你的 error_diagnosis.py
 from knowledge_base import KnowledgeBase
 from question_grammar import IntelligentQA
 
 # 语义分析模块
-from semantic import SemanticAnalyzer, analyze_semantic
-
+from semantic.symbol_table import SemanticAnalyzer, analyze_semantic
 
 class MainWindow(QMainWindow):
     """主窗口"""
@@ -613,9 +614,9 @@ class MainWindow(QMainWindow):
         
         if "文法约束" in func:
             self._run_constraint_generation(input_text)
-        elif "语法错误" in func:
+        elif "语法错误诊断" in func:
             self._run_error_diagnosis(input_text)
-        elif "反馈解析" in func:
+        elif "反馈格式解析" in func:
             self._run_feedback_parsing(input_text)
         elif "AST" in func:
             self._run_ast_similarity(input_text)
@@ -661,105 +662,187 @@ class MainWindow(QMainWindow):
         self.statusBar.showMessage("✅ 文法约束生成完成")
 
     def _run_error_diagnosis(self, input_text: str):
-        error_info = ParseErrorInfo(
-            position=0,
-            line=5,
-            column=12,
-            expected={"id", "num", "("},
-            found=")",
-            message="语法错误：意外的 ')'",
-            context=input_text[:200]
-        )
+            """运行教学型语法错误诊断"""
+            # 创建错误信息
+            error_info = ParseErrorInfo(
+                position=0,
+                line=5,
+                column=12,
+                expected={"id", "num", "("},
+                found=")",
+                message="语法错误：意外的 ')'",
+                context=input_text[:200]
+            )
         
-        diagnostic = self.error_diagnosis.diagnose(error_info)
-        message = self.error_diagnosis.get_diagnostic_message(error_info)
+            # 诊断错误
+            diagnostic = self.error_diagnosis.diagnose(error_info)
         
-        output = f"""
+            # 获取诊断消息（来自 error_diagnosis.py）
+            message = self.error_diagnosis.get_diagnostic_message(error_info)
+        
+            # 尝试调用LLM生成更友好的解释
+            llm_explanation = ""
+            if self.llm_client and self.llm_client.is_available():
+                try:
+                    prompt = self.error_diagnosis.generate_llm_diagnostic_prompt(diagnostic)
+                    llm_response, success = self.llm_client.call_with_retry(
+                        "你是一个编程课程的助教，擅长用通俗易懂的语言解释语法错误。请直接给出解释，不要添加额外格式。",
+                        prompt
+                    )
+                    if success:
+                        llm_explanation = f"""
+{'─' * 70}
+
+🤖 AI助教详解:
+
+{llm_response}
+"""
+                except Exception as e:
+                    print(f"LLM调用失败: {e}")
+        
+            output = f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║                         语法错误诊断结果                                        ║
+║                     📚 教学型语法错误诊断                                      ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
 {message}
+{llm_explanation}
 
 {'─' * 70}
 
 📊 结构化错误信息:
-• 错误位置: ({diagnostic.position[0]}, {diagnostic.position[1]})
+• 错误位置: 第 {diagnostic.position[0]} 行，第 {diagnostic.position[1]} 列
 • 错误类型: {diagnostic.error_type}
-• 期望: {', '.join(diagnostic.expected)}
-• 实际: '{diagnostic.found}'
+• 期望内容: {', '.join(diagnostic.expected)}
+• 实际内容: '{diagnostic.found}'
 """
-        self.llm_output.setText(output)
-        self.statusBar.showMessage("✅ 语法错误诊断完成")
+            self.llm_output.setText(output)
+            self.statusBar.showMessage("✅ 语法错误诊断完成")
 
     def _run_feedback_parsing(self, input_text: str):
-        # 使用 evaluate.py 中的 FeedbackParser
-        from evaluate import FeedbackParser as EvalFeedbackParser
-        from evaluate import LLMClient
+        """解析LLM反馈格式 - 使用 llm/feedback_parser.py"""
+        from llm.feedback_parser import FeedbackParser
         
-        temp_client = LLMClient(mock_mode=True)
-        parser = EvalFeedbackParser(temp_client)
+        parser = FeedbackParser()
+        parsed = parser.parse(input_text)
         
-        parse_success, result, error_msg = parser._parse_output(input_text, True)
-        
-        if parse_success:
-            output = f"""
+        output = f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                         反馈格式解析结果                                        ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
+📝 原始输入:
+{input_text[:500]}{'...' if len(input_text) > 500 else ''}
+
+{'─' * 70}
+
 📊 解析结果:
-• 成功: ✅
-• 分数: {result.get('score', '未识别')}
-• 等级: {result.get('level', '未识别')}
-• 评语: {result.get('comment', '未识别')}
-• 建议: {result.get('suggestion', '未识别')}
+• 解析成功: {'✅ 是' if parsed.success else '❌ 否'}
+• 分数: {parsed.score if parsed.score else '未识别'}
+• 等级: {parsed.level if parsed.level else '未识别'}
+• 评语: {parsed.comment if parsed.comment else '未识别'}
+• 建议: {parsed.suggestion if parsed.suggestion else '未识别'}
 
 {'─' * 70}
 
 📝 错误列表:
 """
-            for err in result.get('errors', []):
-                output += f"  • 行 {err.get('line', '?')}: {err.get('type', 'unknown')} - {err.get('msg', '')}\n"
-            if not result.get('errors'):
-                output += "  无错误信息\n"
-        else:
-            output = f"""
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                         反馈格式解析结果                                        ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
-
-❌ 解析失败: {error_msg}
-"""
+        for err in parsed.errors:
+            output += f"  • 行 {err.get('line', '?')}: {err.get('type', 'unknown')} - {err.get('msg', '')}\n"
+        if not parsed.errors:
+            output += "  无错误信息\n"
+        
+        if not parsed.success and parsed.error_message:
+            output += f"\n⚠️ 解析错误: {parsed.error_message}\n"
         
         self.llm_output.setText(output)
         self.statusBar.showMessage("✅ 反馈解析完成")
 
     def _run_ast_similarity(self, input_text: str):
+        """运行AST相似度评分"""
         from parser.ast_node import ASTNode
+    
+        # 分割学生答案和参考答案
+        student_code = input_text
+        reference_code = input_text
+    
+        # 方法1：按 "// 参考答案" 分割
+        if "// 参考答案" in input_text:
+            parts = input_text.split("// 参考答案")
+            student_part = parts[0].strip()
+            reference_part = parts[1].strip() if len(parts) > 1 else student_part
         
-        # 构建参考AST（基于输入文本）
-        tokens = self.lexical_analyzer.analyze(input_text)[0]
-        parse_result = self.recursive_parser.parse(tokens)
-        
-        if not parse_result.success:
-            self.llm_output.setText("❌ 无法解析输入内容，请确保输入有效的表达式")
+            # 移除 "// 学生答案" 标记
+            student_code = student_part.replace("// 学生答案", "").strip()
+            reference_code = reference_part.strip()
+        else:
+            # 方法2：如果没有标记，尝试按空行分割
+            blocks = input_text.strip().split('\n\n')
+            if len(blocks) >= 2:
+                student_code = blocks[0].strip()
+                reference_code = blocks[1].strip()
+            else:
+                # 方法3：如果只有一个表达式，用自身作为参考（测试用）
+                student_code = input_text.strip()
+                reference_code = input_text.strip()
+    
+        # 提取表达式（去除花括号和return语句）
+        def extract_expr(code: str) -> str:
+            """提取表达式"""
+            # 移除花括号
+            code = code.replace('{', ' ').replace('}', ' ')
+            # 提取 return 后的内容
+            if 'return' in code:
+                import re
+                match = re.search(r'return\s+([^;]+);', code)
+                if match:
+                    return match.group(1).strip()
+            return code.strip()
+    
+        student_expr = extract_expr(student_code)
+        reference_expr = extract_expr(reference_code)
+    
+        self.llm_output.setText(f"🔄 正在分析...\n\n学生: {student_expr}\n参考: {reference_expr}")
+        self.llm_output.repaint()
+        QApplication.processEvents()
+    
+        # 构建学生AST
+        student_tokens, student_errors = self.lexical_analyzer.analyze(student_expr)
+        if student_errors:
+            self.llm_output.setText(f"❌ 学生代码词法分析失败:\n{student_errors}")
             return
-        
-        reference_ast = parse_result.ast
-        student_ast = reference_ast
-        
-        report = self.ast_similarity.get_similarity_report(student_ast, reference_ast)
-        
-        self.llm_output.setText(f"""
+    
+        student_parse = self.recursive_parser.parse(student_tokens)
+        if not student_parse.success:
+            self.llm_output.setText(f"❌ 学生代码解析失败:\n{student_parse.errors}")
+            return
+    
+        # 构建参考AST
+        reference_tokens, ref_errors = self.lexical_analyzer.analyze(reference_expr)
+        if ref_errors:
+            self.llm_output.setText(f"❌ 参考答案词法分析失败:\n{ref_errors}")
+            return
+    
+        reference_parse = self.recursive_parser.parse(reference_tokens)
+        if not reference_parse.success:
+            self.llm_output.setText(f"❌ 参考答案解析失败:\n{reference_parse.errors}")
+            return
+    
+        # 计算相似度 - 注意参数顺序：学生答案在前，参考答案在后
+        report = self.ast_similarity.get_similarity_report(student_parse.ast, reference_parse.ast)
+    
+        output = f"""
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                         AST相似度评分                                           ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
-{report}
-        """)
-        self.statusBar.showMessage("✅ AST相似度评分完成")
+📝 学生表达式: {student_expr}
+📝 参考表达式: {reference_expr}
 
+{report}
+    """
+        self.llm_output.setText(output)
+        self.statusBar.showMessage("✅ AST相似度评分完成")
     def _run_ai_grading(self, input_text: str):
         """运行AI代码批改"""
         print("=" * 50)
@@ -767,10 +850,10 @@ class MainWindow(QMainWindow):
         print(f">>> 输入文本长度: {len(input_text)}")
         print("=" * 50)
         
-        from evaluate import FeedbackParser as EvalFeedbackParser
+        # 使用 llm/llm_client.py 中的 FeedbackParser
+        from llm.llm_client import FeedbackParser
         
-        # 创建反馈解析器
-        parser = EvalFeedbackParser(self.llm_client)
+        parser = FeedbackParser(self.llm_client)
         print(f">>> 解析器创建成功, mock_mode={self.llm_client.mock_mode}")
         
         self.llm_output.setText("🔄 正在调用AI批改代码，请稍候...\n\n这可能需要几秒钟时间。")
@@ -779,8 +862,8 @@ class MainWindow(QMainWindow):
         
         try:
             print(">>> 开始调用 evaluate_submission...")
-            result = parser.evaluate_submission(input_text, enable_extensions=True)
-            print(f">>> 调用完成，结果: {result}")
+            result = parser.evaluate_submission(input_text)
+            print(f">>> 调用完成")
             print(f">>> 评分: {result.get('score')}")
             print(f">>> 解析成功: {result.get('parse_success')}")
             
@@ -823,7 +906,11 @@ class MainWindow(QMainWindow):
 {result.get('raw_output', '')[:800]}{'...' if len(result.get('raw_output', '')) > 800 else ''}
 """
             self.llm_output.setText(output)
-            self.statusBar.showMessage("✅ AI代码批改完成")
+            
+            if result.get('parse_success'):
+                self.statusBar.showMessage("✅ AI代码批改完成")
+            else:
+                self.statusBar.showMessage("⚠️ AI批改完成但格式解析失败")
             
         except Exception as e:
             import traceback

@@ -1,4 +1,4 @@
-"""递归下降解析器"""
+"""递归下降解析器 - 修正版（构建正确的AST）"""
 # parser/recursive_descent.py
 from typing import List, Optional
 from lexer.token import Token, TokenType
@@ -7,7 +7,7 @@ from .ast_node import ASTNode, ParseResult
 
 class RecursiveDescentParser:
     """
-    递归下降语法分析器
+    递归下降语法分析器 - 构建反映运算符优先级的AST
 
     文法：
     E  → T E'
@@ -47,108 +47,103 @@ class RecursiveDescentParser:
         """前进到下一个Token"""
         self.pos += 1
 
-    def _match(self, expected_type: TokenType, expected_value: Optional[str] = None) -> bool:
-        """匹配当前Token"""
+    def _expect(self, expected_type: TokenType, expected_value: Optional[str] = None) -> Optional[Token]:
+        """期望并消费当前Token"""
         token = self._current_token()
         if token is None:
             self.errors.append(f"期望 {expected_type}，但遇到文件结束")
-            return False
+            return None
 
         if token.type != expected_type:
             self.errors.append(f"期望 {expected_type}，但遇到 {token.type} (值: {token.value})")
-            return False
+            return None
 
         if expected_value is not None and token.value != expected_value:
             self.errors.append(f"期望 '{expected_value}'，但遇到 '{token.value}'")
-            return False
+            return None
 
-        return True
-
-    def _expect(self, expected_type: TokenType, expected_value: Optional[str] = None) -> Optional[Token]:
-        """期望并消费当前Token"""
-        if self._match(expected_type, expected_value):
-            token = self._current_token()
-            self._advance()
-            return token
-        return None
+        self._advance()
+        return token
 
     def _parse_E(self) -> ASTNode:
-        """E → T E'"""
-        t_node = self._parse_T()
-        e_prime_node = self._parse_E_prime()
-        return ASTNode(type="E", children=[t_node, e_prime_node])
-
-    def _parse_E_prime(self) -> ASTNode:
-        """E' → + T E' | - T E' | ε"""
-        token = self._current_token()
-        if token and token.type == TokenType.OPERATOR:
-            if token.value == '+':
-                self._advance()
-                t_node = self._parse_T()
-                e_prime_node = self._parse_E_prime()
-                return ASTNode(type="E'", value="+", children=[t_node, e_prime_node])
-            elif token.value == '-':
-                self._advance()
-                t_node = self._parse_T()
-                e_prime_node = self._parse_E_prime()
-                return ASTNode(type="E'", value="-", children=[t_node, e_prime_node])
-
-        # ε产生式
-        return ASTNode(type="E'", value="ε")
+        """
+        E → T E'
+        
+        返回左结合的AST，如 a + b + c → ((a + b) + c)
+        """
+        node = self._parse_T()
+        
+        while True:
+            token = self._current_token()
+            if token and token.type == TokenType.OPERATOR:
+                if token.value == '+':
+                    self._advance()
+                    right = self._parse_T()
+                    node = ASTNode(type="+", value="+", children=[node, right])
+                elif token.value == '-':
+                    self._advance()
+                    right = self._parse_T()
+                    node = ASTNode(type="-", value="-", children=[node, right])
+                else:
+                    break
+            else:
+                break
+        
+        return node
 
     def _parse_T(self) -> ASTNode:
-        """T → F T'"""
-        f_node = self._parse_F()
-        t_prime_node = self._parse_T_prime()
-        return ASTNode(type="T", children=[f_node, t_prime_node])
-
-    def _parse_T_prime(self) -> ASTNode:
-        """T' → * F T' | / F T' | ε"""
-        token = self._current_token()
-        if token and token.type == TokenType.OPERATOR:
-            if token.value == '*':
-                self._advance()
-                f_node = self._parse_F()
-                t_prime_node = self._parse_T_prime()
-                return ASTNode(type="T'", value="*", children=[f_node, t_prime_node])
-            elif token.value == '/':
-                self._advance()
-                f_node = self._parse_F()
-                t_prime_node = self._parse_T_prime()
-                return ASTNode(type="T'", value="/", children=[f_node, t_prime_node])
-
-        # ε产生式
-        return ASTNode(type="T'", value="ε")
+        """
+        T → F T'
+        
+        返回左结合的AST，如 a * b * c → ((a * b) * c)
+        """
+        node = self._parse_F()
+        
+        while True:
+            token = self._current_token()
+            if token and token.type == TokenType.OPERATOR:
+                if token.value == '*':
+                    self._advance()
+                    right = self._parse_F()
+                    node = ASTNode(type="*", value="*", children=[node, right])
+                elif token.value == '/':
+                    self._advance()
+                    right = self._parse_F()
+                    node = ASTNode(type="/", value="/", children=[node, right])
+                else:
+                    break
+            else:
+                break
+        
+        return node
 
     def _parse_F(self) -> ASTNode:
         """F → ( E ) | id | num"""
         token = self._current_token()
         if token is None:
             self.errors.append("期望 '(', id 或 num，但遇到文件结束")
-            return ASTNode(type="F", value="error")
+            return ASTNode(type="error", value="error")
 
         if token.type == TokenType.DELIMITER and token.value == '(':
             self._advance()
-            e_node = self._parse_E()
+            node = self._parse_E()
             if not self._expect(TokenType.DELIMITER, ')'):
                 self.errors.append("期望 ')'")
-            return ASTNode(type="F", value="()", children=[e_node])
+            return node  # 直接返回子节点，不包装 F 节点
         elif token.type == TokenType.IDENTIFIER:
             self._advance()
-            return ASTNode(type="F", value="id", children=[ASTNode(type="id", value=token.value)])
+            return ASTNode(type="id", value=token.value)
         elif token.type == TokenType.CONSTANT:
-            # 判断是否为数字
             val = token.value
             if val.replace('.', '').replace('-', '').isdigit():
                 self._advance()
-                return ASTNode(type="F", value="num", children=[ASTNode(type="num", value=val)])
+                return ASTNode(type="num", value=val)
             else:
-                # 字符串常量或其他
                 self._advance()
-                return ASTNode(type="F", value="const", children=[ASTNode(type="const", value=val)])
+                return ASTNode(type="string", value=val)
         else:
             self.errors.append(f"期望 '(', id 或 num，但遇到 {token.type} (值: {token.value})")
-            return ASTNode(type="F", value="error")
+            return ASTNode(type="error", value="error")
 
 
 __all__ = ['RecursiveDescentParser']

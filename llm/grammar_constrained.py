@@ -21,125 +21,21 @@ class GrammarConstrainedGenerator:
     """
     文法引导的LLM约束生成器
 
-    以LL(1)分析表为约束，在大模型逐Token输出时进行合法性校验
+    核心思想：不强制修改LLM输出，而是验证格式并给出修正建议
     """
 
     def __init__(self, grammar_type: str = "feedback"):
-        """
-        初始化
-
-        Args:
-            grammar_type: 文法类型 - "feedback" 或 "expression"
-        """
         self.grammar_type = grammar_type
-
-        if grammar_type == "feedback":
-            self._init_feedback_grammar()
-        else:
-            self._init_expression_grammar()
-
-        self.constraint_mode = True
         self.correction_stats = {"total_tokens": 0, "invalid_tokens": 0, "corrections": []}
-
-    def _init_feedback_grammar(self):
-        """初始化反馈格式文法"""
-        # 非终结符
-        self.Vn = {"Feedback", "FieldList", "Field", "ScoreField", "LevelField",
-                   "CommentBlock", "TextField", "SuggestionField", "ErrorList",
-                   "ErrorItems", "ErrorItem", "ErrorParams", "ParamList", "Param"}
-
-        # 终结符
-        self.Vt = {"feedback", "score", "level", "comment", "text", "suggestion",
-                   "errors", "error", "line", "type", "msg", ":", ";", "{", "}", "(", ")", "[", "]", ","}
-
-        # 预测分析表（简化版）
-        self.predict_table: Dict[Tuple[str, str], str] = {
-            ("Feedback", "feedback"): "feedback { FieldList }",
-            ("FieldList", "score"): "ScoreField FieldList",
-            ("FieldList", "level"): "LevelField FieldList",
-            ("FieldList", "comment"): "CommentBlock FieldList",
-            ("FieldList", "errors"): "ErrorList FieldList",
-            ("FieldList", "}"): "ε",
-            ("ScoreField", "score"): "score : NUMBER ;",
-            ("LevelField", "level"): "level : IDENT ;",
-            ("CommentBlock", "comment"): "comment { TextField SuggestionField }",
-            ("TextField", "text"): "text : STRING ;",
-            ("SuggestionField", "suggestion"): "suggestion : STRING ;",
-            ("ErrorList", "errors"): "errors [ ErrorItems ]",
-            ("ErrorItems", "error"): "ErrorItem ErrorItems",
-            ("ErrorItems", "]"): "ε",
-            ("ErrorItem", "error"): "error ( ErrorParams ) ;",
-            ("ErrorParams", "line"): "ParamList",
-            ("ParamList", "line"): "Param , ParamList",
-            ("ParamList", ")"): "ε",
-            ("Param", "line"): "line : NUMBER",
-            ("Param", "type"): "type : IDENT",
-            ("Param", "msg"): "msg : STRING",
-        }
-
-        self.start_symbol = "Feedback"
-
-    def _init_expression_grammar(self):
-        """初始化表达式文法"""
-        self.Vn = {"E", "E'", "T", "T'", "F"}
-        self.Vt = {"+", "-", "*", "/", "(", ")", "id", "num", "$"}
-
-        self.predict_table: Dict[Tuple[str, str], str] = {
-            ("E", "id"): "T E'",
-            ("E", "num"): "T E'",
-            ("E", "("): "T E'",
-            ("E'", "+"): "+ T E'",
-            ("E'", "-"): "- T E'",
-            ("E'", ")"): "ε",
-            ("E'", "$"): "ε",
-            ("T", "id"): "F T'",
-            ("T", "num"): "F T'",
-            ("T", "("): "F T'",
-            ("T'", "*"): "* F T'",
-            ("T'", "/"): "/ F T'",
-            ("T'", "+"): "ε",
-            ("T'", "-"): "ε",
-            ("T'", ")"): "ε",
-            ("T'", "$"): "ε",
-            ("F", "id"): "id",
-            ("F", "num"): "num",
-            ("F", "("): "( E )",
-        }
-
-        self.start_symbol = "E"
-
-    def validate_token(self, token: str, context: str) -> Tuple[bool, Set[str]]:
-        """
-        验证Token是否合法
-
-        Args:
-            token: 当前Token
-            context: 上下文（当前非终结符）
-
-        Returns:
-            (是否合法, 期望的Token集合)
-        """
-        key = (context, token)
-        if key in self.predict_table:
-            return True, {token}
-
-        # 查找可能的期望Token
-        expected = set()
-        for (ctx, t) in self.predict_table.keys():
-            if ctx == context:
-                expected.add(t)
-
-        return False, expected
 
     def constrain_generation(self, llm_output: str) -> GenerationResult:
         """
-        对LLM输出进行文法约束修正
+        对LLM输出进行文法约束验证和修正
 
-        Args:
-            llm_output: LLM原始输出
-
-        Returns:
-            约束后的结果
+        策略：
+        1. 先验证格式是否合规
+        2. 如果不合规，提取关键信息并重新构造标准格式
+        3. 保留原始值，只修正结构问题
         """
         result = GenerationResult(
             success=False,
@@ -150,22 +46,26 @@ class GrammarConstrainedGenerator:
         # 清理输出
         cleaned = self._clean_output(llm_output)
 
-        # 逐Token验证和修正
-        constrained, corrections, steps = self._validate_and_correct(cleaned)
-
-        result.constrained_text = constrained
-        result.corrections = corrections
-        result.token_validation_steps = steps
-        result.format_compliant = self._check_full_compliance(constrained)
-
-        if result.format_compliant:
+        # 验证格式合规性
+        is_compliant, issues = self._validate_format(cleaned)
+        
+        if is_compliant:
+            # 格式已经合规，直接返回
+            result.constrained_text = cleaned
+            result.format_compliant = True
             result.success = True
-            result.text = constrained
-
-        # 更新统计
-        self.correction_stats["total_tokens"] += len(cleaned.split())
-        self.correction_stats["invalid_tokens"] += len(corrections)
-        self.correction_stats["corrections"].extend(corrections)
+            result.text = cleaned
+            result.corrections = []
+        else:
+            # 格式不合规，尝试修复
+            constrained, corrections = self._repair_format(cleaned, issues)
+            result.constrained_text = constrained
+            result.corrections = corrections
+            result.format_compliant = self._validate_format(constrained)[0]
+            
+            if result.format_compliant:
+                result.success = True
+                result.text = constrained
 
         return result
 
@@ -174,199 +74,133 @@ class GrammarConstrainedGenerator:
         # 移除Markdown代码块标记
         text = re.sub(r'```\w*\n?', '', text)
         text = re.sub(r'```', '', text)
+        
+        # 保留换行但移除多余空行
+        lines = [line.rstrip() for line in text.split('\n') if line.strip() or line.strip() == '']
+        text = '\n'.join(lines)
+        
+        return text.strip()
 
-        # 移除多余空格
-        text = re.sub(r'\s+', ' ', text)
-        text = text.strip()
-
-        return text
-
-    def _tokenize(self, text: str) -> List[str]:
-        """将文本转换为Token序列"""
-        # 简单分词
-        tokens = []
-        i = 0
-        n = len(text)
-
-        while i < n:
-            ch = text[i]
-
-            # 数字
-            if ch.isdigit():
-                start = i
-                while i < n and (text[i].isdigit() or text[i] == '.'):
-                    i += 1
-                tokens.append("NUMBER")
-                continue
-
-            # 标识符/关键字
-            elif ch.isalpha() or ch == '_':
-                start = i
-                while i < n and (text[i].isalnum() or text[i] == '_'):
-                    i += 1
-                token = text[start:i].lower()
-                if token in self.Vt:
-                    tokens.append(token)
-                else:
-                    tokens.append("IDENT")
-                continue
-
-            # 字符串
-            elif ch == '"' or ch == "'":
-                tokens.append("STRING")
-                i += 1
-                while i < n and text[i] != ch:
-                    i += 1
-                i += 1
-                continue
-
-            # 符号
-            elif ch in self.Vt:
-                tokens.append(ch)
-                i += 1
-
-            else:
-                i += 1
-
-        return tokens
-
-    def _validate_and_correct(self, text: str) -> Tuple[str, List[str], List[str]]:
+    def _validate_format(self, text: str) -> Tuple[bool, List[str]]:
         """
-        验证并修正Token序列
+        验证反馈格式是否合规
+        
+        Returns:
+            (是否合规, 问题列表)
         """
-        tokens = self._tokenize(text)
-        stack = [self.start_symbol]
-        pos = 0
+        issues = []
+        
+        # 必需的组件及其正则表达式
+        required_patterns = [
+            (r'feedback\s*\{', "缺少 'feedback {' 开头"),
+            (r'score\s*:\s*\d+\s*;?', "缺少或格式错误的 score 字段 (应为 'score: 数字;')"),
+            (r'level\s*:\s*\w+\s*;?', "缺少或格式错误的 level 字段 (应为 'level: 标识符;')"),
+            (r'comment\s*\{', "缺少 'comment {' 块"),
+            (r'text\s*:\s*"[^"]*"\s*;?', "缺少或格式错误的 text 字段 (应为 'text: \"内容\";')"),
+            (r'suggestion\s*:\s*"[^"]*"\s*;?', "缺少或格式错误的 suggestion 字段 (应为 'suggestion: \"内容\";')"),
+            (r'\}\s*\]?\s*\}?', "缺少结尾的 '}' (可能多个)"),
+            (r'errors\s*\[', "缺少或格式错误的 errors 块 (应为 'errors [')"),
+            (r'error\s*\(', "缺少 error 项 (应为 'error(')"),
+            (r'line\s*:\s*\d+', "缺少 line 参数 (应为 'line: 数字')"),
+            (r'type\s*:\s*\w+', "缺少 type 参数 (应为 'type: 标识符')"),
+            (r'msg\s*:\s*"[^"]*"', "缺少 msg 参数 (应为 'msg: \"内容\"')"),
+        ]
+        
+        for pattern, message in required_patterns:
+            if not re.search(pattern, text, re.IGNORECASE):
+                issues.append(message)
+        
+        # 检查括号匹配
+        brace_count = text.count('{') - text.count('}')
+        bracket_count = text.count('[') - text.count(']')
+        paren_count = text.count('(') - text.count(')')
+        
+        if brace_count > 0:
+            issues.append(f"缺少 {brace_count} 个右花括号 '}}'")
+        if brace_count < 0:
+            issues.append(f"多余的右花括号")
+        if bracket_count > 0:
+            issues.append(f"缺少 {bracket_count} 个右方括号 ']'")
+        if bracket_count < 0:
+            issues.append(f"多余的右方括号")
+        if paren_count > 0:
+            issues.append(f"缺少 {paren_count} 个右括号 ')'")
+        if paren_count < 0:
+            issues.append(f"多余的右括号")
+        
+        return len(issues) == 0, issues
+
+    def _repair_format(self, text: str, issues: List[str]) -> Tuple[str, List[str]]:
+        """
+        修复格式问题
+        
+        策略：提取关键信息，重新构造标准格式
+        """
         corrections = []
-        steps = []
-
-        while stack and pos <= len(tokens):
-            top = stack.pop()
-            steps.append(f"栈: {stack[::-1]}, 输入: {tokens[pos:] if pos < len(tokens) else []}")
-
-            if top in self.Vt:
-                if pos < len(tokens) and top == tokens[pos]:
-                    steps.append(f"  匹配: {top}")
-                    pos += 1
-                else:
-                    # Token不匹配，尝试修正
-                    if pos < len(tokens):
-                        expected = self._get_expected(stack[-1] if stack else self.start_symbol)
-                        correction = f"替换 '{tokens[pos]}' 为 '{top}' (期望: {expected})"
-                        corrections.append(correction)
-                        steps.append(f"  修正: {correction}")
-                        # 使用期望的token
-                        pos += 1
-                    else:
-                        # 缺少Token
-                        if top != "$":
-                            correction = f"插入缺失的 '{top}'"
-                            corrections.append(correction)
-                            steps.append(f"  修正: {correction}")
-
-            elif top in self.Vn:
-                if pos < len(tokens):
-                    current = tokens[pos]
-                    key = (top, current)
-                    if key in self.predict_table:
-                        production = self.predict_table[key]
-                        steps.append(f"  展开 {top} → {production}")
-                        if production != "ε":
-                            for sym in reversed(production.split()):
-                                stack.append(sym)
-                    else:
-                        # 无产生式可用，尝试跳过当前token
-                        expected = self._get_expected(top)
-                        correction = f"跳过非法Token '{current}' (期望: {expected})"
-                        corrections.append(correction)
-                        steps.append(f"  修正: {correction}")
-                        pos += 1
-                else:
-                    # 输入结束，检查是否可以接受空
-                    key = (top, "$")
-                    if key in self.predict_table:
-                        production = self.predict_table[key]
-                        if production != "ε":
-                            correction = f"在输入结束处插入 '{top}' 的展开"
-                            corrections.append(correction)
-                            steps.append(f"  修正: {correction}")
-                continue
-
-            elif top == "$":
-                break
-
-        steps.append("验证完成")
-
-        # 重建修正后的文本
-        corrected_text = self._rebuild_text(tokens, corrections)
-
-        return corrected_text, corrections, steps
-
-    def _get_expected(self, nonterminal: str) -> Set[str]:
-        """获取期望的Token集合"""
-        expected = set()
-        for (nt, t) in self.predict_table.keys():
-            if nt == nonterminal:
-                expected.add(t)
-        return expected
-
-    def _check_full_compliance(self, text: str) -> bool:
-        """检查文本是否完全符合文法"""
-        tokens = self._tokenize(text)
-        stack = [self.start_symbol]
-        pos = 0
-
-        while stack and pos <= len(tokens):
-            top = stack.pop()
-
-            if top in self.Vt:
-                if pos < len(tokens) and top == tokens[pos]:
-                    pos += 1
-                else:
-                    return False
-            elif top in self.Vn:
-                if pos < len(tokens):
-                    current = tokens[pos]
-                    key = (top, current)
-                    if key in self.predict_table:
-                        production = self.predict_table[key]
-                        if production != "ε":
-                            for sym in reversed(production.split()):
-                                stack.append(sym)
-                    else:
-                        return False
-                else:
-                    key = (top, "$")
-                    if key not in self.predict_table or self.predict_table[key] == "ε":
-                        pass
-                    else:
-                        return False
-            elif top == "$":
-                break
-
-        return pos == len(tokens)
-
-    def _rebuild_text(self, tokens: List[str], corrections: List[str]) -> str:
-        """根据修正重建文本"""
-        # 简化实现：直接返回原始文本
-        return ' '.join(tokens)
+        
+        # 提取 score
+        score_match = re.search(r'score\s*:\s*(\d+)', text, re.IGNORECASE)
+        score = score_match.group(1) if score_match else "0"
+        if not score_match:
+            corrections.append("未找到 score 字段，使用默认值 0")
+        
+        # 提取 level
+        level_match = re.search(r'level\s*:\s*(\w+)', text, re.IGNORECASE)
+        level = level_match.group(1) if level_match else "medium"
+        if not level_match:
+            corrections.append("未找到 level 字段，使用默认值 'medium'")
+        
+        # 提取 comment text
+        text_match = re.search(r'text\s*:\s*"([^"]*)"', text, re.IGNORECASE)
+        comment_text = text_match.group(1) if text_match else "评语"
+        if not text_match:
+            corrections.append("未找到 text 字段，使用默认评语")
+        
+        # 提取 suggestion
+        suggestion_match = re.search(r'suggestion\s*:\s*"([^"]*)"', text, re.IGNORECASE)
+        suggestion = suggestion_match.group(1) if suggestion_match else "建议"
+        if not suggestion_match:
+            corrections.append("未找到 suggestion 字段，使用默认建议")
+        
+        # 提取 errors
+        errors = []
+        error_pattern = r'error\s*\(\s*line\s*:\s*(\d+)\s*,\s*type\s*:\s*(\w+)\s*,\s*msg\s*:\s*"([^"]*)"\s*\)'
+        error_matches = re.findall(error_pattern, text, re.IGNORECASE)
+        
+        for line_num, error_type, msg in error_matches:
+            errors.append(f"    error(line: {line_num}, type: {error_type}, msg: \"{msg}\")")
+        
+        if not errors:
+            corrections.append("未找到 errors 列表，使用空列表")
+        
+        # 重新构造标准格式
+        constrained = f"""feedback {{
+    score: {score}
+    level: {level}
+    comment {{
+        text: "{comment_text}"
+        suggestion: "{suggestion}"
+    }}
+    errors [
+{chr(10).join(errors) if errors else "        // 无错误"
+    }
+    ]
+}}"""
+        
+        return constrained, corrections
 
     def get_statistics(self) -> Dict:
         """获取统计信息"""
-        total = self.correction_stats["total_tokens"]
-        invalid = self.correction_stats["invalid_tokens"]
-
         return {
-            "total_tokens": total,
-            "invalid_tokens": invalid,
-            "valid_rate": 1.0 - (invalid / total) if total > 0 else 1.0,
+            "total_tokens": self.correction_stats["total_tokens"],
+            "invalid_tokens": self.correction_stats["invalid_tokens"],
             "corrections_count": len(self.correction_stats["corrections"])
         }
 
     def run_comparison_experiment(self, raw_outputs: List[str]) -> Dict:
         """
         运行对照实验
-
+        
         Args:
             raw_outputs: 原始LLM输出列表
 
@@ -375,8 +209,6 @@ class GrammarConstrainedGenerator:
         """
         results = {
             "total": len(raw_outputs),
-            "raw_success": 0,
-            "constrained_success": 0,
             "raw_compliant": 0,
             "constrained_compliant": 0,
             "corrections_per_output": [],
@@ -385,7 +217,7 @@ class GrammarConstrainedGenerator:
 
         for output in raw_outputs:
             # 检查原始输出是否合规
-            original_compliant = self._check_full_compliance(self._clean_output(output))
+            original_compliant, _ = self._validate_format(output)
             if original_compliant:
                 results["raw_compliant"] += 1
 
@@ -398,12 +230,8 @@ class GrammarConstrainedGenerator:
             results["corrections_per_output"].append(len(constrained_result.corrections))
 
         # 计算改善率
-        if results["raw_compliant"] > 0:
-            raw_rate = results["raw_compliant"] / results["total"]
-            constrained_rate = results["constrained_compliant"] / results["total"]
-            results["improvement_rate"] = constrained_rate - raw_rate
-        else:
-            results["improvement_rate"] = results["constrained_compliant"] / results["total"]
+        if results["total"] > 0:
+            results["improvement_rate"] = (results["constrained_compliant"] - results["raw_compliant"]) / results["total"]
 
         return results
 
